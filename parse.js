@@ -21,6 +21,14 @@ function isPunct(ch) {
   return r;
 }
 function isSpace(ch) { return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r'; }
+// Unicode whitespace per CommonMark spec (used ONLY for emphasis flanking):
+// ASCII ws + U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000
+function isUnicodeWs(ch) {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\v' || ch === '\f' ||
+    ch === '\u0085' || ch === '\u00a0' || ch === '\u1680' ||
+    (ch >= '\u2000' && ch <= '\u200a') || ch === '\u2028' || ch === '\u2029' ||
+    ch === '\u202f' || ch === '\u205f' || ch === '\u3000';
+}
 function isDigit(ch) { return ch >= '0' && ch <= '9'; }
 function isAlpha(ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'); }
 function isAlnum(ch) { return isAlpha(ch) || isDigit(ch); }
@@ -399,8 +407,8 @@ function parseInline(src, refs, opts) {
     const before = pos > 0 ? src[pos - 1] : '';
     const after = pos + len < n ? src[pos + len] : '';
     // start/end of string count as whitespace for flanking purposes
-    const beforeWs = before === '' || isSpace(before);
-    const afterWs = after === '' || isSpace(after);
+    const beforeWs = before === '' || isUnicodeWs(before);
+    const afterWs = after === '' || isUnicodeWs(after);
     const beforePunct = isPunct(before);
     const afterPunct = isPunct(after);
     const leftFlanking = !afterWs && (!afterPunct || beforeWs || beforePunct);
