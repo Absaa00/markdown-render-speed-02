@@ -17,7 +17,7 @@ function isPunct(ch) {
   const code = ch.codePointAt(0);
   if (code < 128) return ASCII_PUNCT.has(ch);
   let r = _punctCache.get(code);
-  if (r === undefined) { r = /\p{P}/u.test(ch); _punctCache.set(code, r); }
+  if (r === undefined) { r = /[\p{P}\p{S}]/u.test(ch); _punctCache.set(code, r); }
   return r;
 }
 function isSpace(ch) { return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r'; }
@@ -398,6 +398,7 @@ function parseInline(src, refs, opts) {
   const canOpenClose = (pos, len, ch) => {
     const before = pos > 0 ? src[pos - 1] : '';
     const after = pos + len < n ? src[pos + len] : '';
+    // start/end of string count as whitespace for flanking purposes
     const beforeWs = before === '' || isSpace(before);
     const afterWs = after === '' || isSpace(after);
     const beforePunct = isPunct(before);
@@ -613,18 +614,24 @@ function parseInline(src, refs, opts) {
 
 // ---- emphasis / strikethrough resolution ----
 function processEmphasis(nodes) {
-  const bottom = { '*': -1, '_': -1, '~': -1 };
+  // openersBottom[ch] is a NODE reference: the scan for an opener stops when
+  // it reaches that node. When an opener is fully consumed, the bottom is
+  // set to the closer node; if the closer was also fully consumed (removed
+  // from the list) the bottom no longer blocks the scan, so an outer opener
+  // can still match a later closer.
+  const bottom = { '*': null, '_': null, '~': null };
   for (let ci = 0; ci < nodes.length; ci++) {
     const closer = nodes[ci];
     if (closer.t !== 'delim' || !closer.canClose || !closer.active) continue;
     const ch = closer.ch;
     // find opener
     let oi = -1;
-    for (let q = ci - 1; q > bottom[ch]; q--) {
+    for (let q = ci - 1; q >= 0; q--) {
       const cand = nodes[q];
+      if (cand === bottom[ch]) break;
       if (cand.t !== 'delim' || cand.ch !== ch || !cand.canOpen || !cand.active) continue;
       if (ch === '~' && (cand.len < 2 || closer.len < 2)) continue;
-      if (cand.canClose && closer.canOpen && (cand.len + closer.len) % 3 === 0) continue;
+      if ((cand.canClose || closer.canOpen) && (cand.len + closer.len) % 3 === 0) continue;
       oi = q; break;
     }
     if (oi === -1) continue;
@@ -643,7 +650,7 @@ function processEmphasis(nodes) {
       nodes.splice(oi, 0, opener);
       insertPos++;
     } else {
-      bottom[ch] = oi; // opener fully consumed: nothing before it can open later
+      bottom[ch] = closer; // opener fully consumed
     }
     if (closer.len > 0) {
       closer.s = closer.ch.repeat(closer.len);
@@ -828,6 +835,7 @@ function matchListMarker(L) {
 
 // Does the line (at L, after <=3 spaces) start a block that can interrupt
 // a paragraph? (ATX, fence, HTML 1-6, thematic break, list, blockquote)
+// An empty list item cannot interrupt; an ordered list only if it starts at 1.
 function lineInterrupts(L) {
   const ic = peek(L);
   if (ic === '#') return !!matchATX(L);
@@ -835,12 +843,23 @@ function lineInterrupts(L) {
   if (ic === '<') { const hb = matchHtmlBlockStart(L); return hb >= 1 && hb <= 6; }
   if (ic === '*' || ic === '-' || ic === '_') {
     if (matchThematicBreak(L)) return true;
-    if (ic !== '_') return !!matchListMarker(L);
+    if (ic !== '_') return listInterrupts(L);
     return false;
   }
   if (ic === '>') return true;
-  if (ic === '+' || isDigit(ic)) return !!matchListMarker(L);
+  if (ic === '+' || isDigit(ic)) return listInterrupts(L);
   return false;
+}
+// A list marker at L that can interrupt a paragraph: non-empty item, and
+// an ordered list only when it starts at 1.
+function listInterrupts(L) {
+  const lm = matchListMarker(L);
+  if (!lm) return false;
+  if (lm.spacesAfter === 0) return false;
+  const after = rest(L).slice(lm.markerLen + (lm.spacesAfter <= 4 ? lm.spacesAfter : 1));
+  if (after.trim() === '') return false;
+  if (lm.type === 'ordered' && lm.start !== 1) return false;
+  return true;
 }
 
 // Try to parse a link reference definition starting at `first` (rest of the
@@ -895,6 +914,9 @@ export function parseBlocks(markdown) {
 
   const root = { t: 'document', children: [], parent: null, open: true };
   let tip = root;
+  // last finalized HTML block: its trailing newline is dropped if the next
+  // line is blank (marked's HTML-block text ends before a blank line)
+  let pendingHtml = null;
 
   function addChild(parent, node) {
     node.parent = parent;
@@ -909,6 +931,7 @@ export function parseBlocks(markdown) {
   }
   function finalize(node) {
     node.open = false;
+    if (node.t === 'html_block') pendingHtml = node;
     if (node.t === 'paragraph') {
       // strip leading link reference definitions
       let li = 0;
@@ -1026,7 +1049,24 @@ export function parseBlocks(markdown) {
     if (!matched && tip.t === 'paragraph' && !blank) {
       const saveL = { i: L.i, col: L.col, partial: L.partial };
       advSpaces(L, 3);
-      if (!lineInterrupts(L)) {
+      let interrupts = lineInterrupts(L);
+      if (!interrupts) {
+        // a line starting a new item of the list this paragraph belongs to
+        // is not a lazy continuation either
+        const lm = matchListMarker(L);
+        if (lm) {
+          let p = tip.parent;
+          while (p && p.t !== 'item' && p.t !== 'document') p = p.parent;
+          if (p && p.t === 'item') {
+            const al = p.parent;
+            if (al && al.t === 'list' && al.listType === lm.type &&
+                (lm.type === 'bullet' ? al.bulletChar === lm.char : al.delim === lm.delim)) {
+              interrupts = true;
+            }
+          }
+        }
+      }
+      if (!interrupts) {
         advSpaces(L, 1000);
         let text = rest(L);
         if (/^(=+|-+)[ \t]*$/.test(text)) text = '    ' + text;
@@ -1044,6 +1084,12 @@ export function parseBlocks(markdown) {
 
     // blank line: ends paragraph, marks blanks for lists
     if (blank) {
+      // an HTML block finalized on the previous line loses its trailing
+      // newline when a blank line follows it
+      if (pendingHtml && pendingHtml.literal.endsWith('\n')) {
+        pendingHtml.literal = pendingHtml.literal.slice(0, -1);
+      }
+      pendingHtml = null;
       if (leaf && leaf.t === 'paragraph') { finalize(leaf); tip = container; leaf = null; }
       else if (leaf && leaf.t === 'code_block' && !leaf.fenced) {
         // blank line inside indented code: keep whitespace beyond 4 cols
@@ -1065,15 +1111,15 @@ export function parseBlocks(markdown) {
         if (leaf.literal.endsWith('\n')) leaf.literal = leaf.literal.slice(0, -1);
         finalize(leaf); tip = container; leaf = null;
       }
-      // mark blank for list looseness
-      let c = container;
-      while (c && c.t !== 'document') {
-        if (c.t === 'item') c._blankSeen = true;
-        c = c.parent;
-      }
+      // mark blank for list looseness: only the innermost item directly
+      // containing this blank line (a blank inside a nested block does not
+      // make the outer list loose)
+      if (container.t === 'item') container._blankSeen = true;
       ln++;
       continue;
     }
+    // non-blank line: a previous HTML block keeps its trailing newline
+    pendingHtml = null;
 
     // ---- 3. leaf-specific handling ----
     if (leaf) {
@@ -1156,12 +1202,7 @@ export function parseBlocks(markdown) {
         // interrupting blocks: ATX, fence, HTML 1-6, thematic break,
         // blockquote, list (bullet, or ordered starting at 1)
         if (leaf) {
-        let interrupts = lineInterrupts(L);
-        if (interrupts && isDigit(peek(L))) {
-          // an ordered list interrupts a paragraph only if it starts at 1
-          const lm = matchListMarker(L);
-          interrupts = !!lm && lm.start === 1;
-        }
+        const interrupts = lineInterrupts(L);
         if (interrupts) {
           finalize(leaf); tip = container; leaf = null;
           // fall through to new-block detection (L still positioned)
@@ -1239,6 +1280,7 @@ export function parseBlocks(markdown) {
         if (hb) {
           const node = addChild(container, { t: 'html_block', blockType: hb, literal: rest(L) + (lastLineHasNL ? '\n' : '') });
           if (hb === 6 || hb === 7 || !htmlBlockEnds(hb, rawLine)) tip = node;
+          else finalize(node); // single-line block ending on this line
           ln++; break;
         }
       }
