@@ -752,7 +752,7 @@ function matchHtmlBlockStart(L) {
   const s = L.s, i = L.i;
   if (s[i] !== '<') return 0;
   const sub = s.slice(i, i + 12).toLowerCase();
-  if (/^<(script|pre|style|textarea)(\s|>|\/)/.test(sub)) return 1;
+  if (/^<(script|pre|style|textarea)(\s|>|\/|\n|$)/.test(sub + '\n')) return 1;
   if (s.startsWith('<!--', i)) return 2;
   if (s.startsWith('<?', i)) return 3;
   if (i + 2 < s.length && s[i + 1] === '!' && s[i + 2] >= 'A' && s[i + 2] <= 'Z') return 4;
@@ -760,8 +760,13 @@ function matchHtmlBlockStart(L) {
   // type 6: block tag open/close
   const m = /^<\/?([A-Za-z][A-Za-z0-9-]*)(\s|\/?>)/.exec(s.slice(i, i + 40));
   if (m && BLOCK_TAGS.has(m[1].toLowerCase())) return 6;
-  // type 7: any complete open tag
-  if (matchTag(s, i) !== -1) return 7;
+  // type 7: a single complete open tag alone on the line
+  const te = matchTag(s, i);
+  if (te !== -1) {
+    let k = te;
+    while (k < s.length && (s[k] === ' ' || s[k] === '\t')) k++;
+    if (k === s.length) return 7;
+  }
   return 0;
 }
 function htmlBlockEnds(type, line, isFirst) {
@@ -819,6 +824,23 @@ function matchListMarker(L) {
     return { type: 'ordered', start: parseInt(m[1], 10), delim: m[2], markerLen: m[1].length + 1, spacesAfter: spaces };
   }
   return null;
+}
+
+// Does the line (at L, after <=3 spaces) start a block that can interrupt
+// a paragraph? (ATX, fence, HTML 1-6, thematic break, list, blockquote)
+function lineInterrupts(L) {
+  const ic = peek(L);
+  if (ic === '#') return !!matchATX(L);
+  if (ic === '`' || ic === '~') return !!matchFence(L);
+  if (ic === '<') { const hb = matchHtmlBlockStart(L); return hb >= 1 && hb <= 6; }
+  if (ic === '*' || ic === '-' || ic === '_') {
+    if (matchThematicBreak(L)) return true;
+    if (ic !== '_') return !!matchListMarker(L);
+    return false;
+  }
+  if (ic === '>') return true;
+  if (ic === '+' || isDigit(ic)) return !!matchListMarker(L);
+  return false;
 }
 
 // Try to parse a link reference definition starting at `first` (rest of the
@@ -1004,15 +1026,7 @@ export function parseBlocks(markdown) {
     if (!matched && tip.t === 'paragraph' && !blank) {
       const saveL = { i: L.i, col: L.col, partial: L.partial };
       advSpaces(L, 3);
-      const ic = peek(L);
-      let interrupts = false;
-      if (ic === '#') interrupts = !!matchATX(L);
-      else if (ic === '`' || ic === '~') interrupts = !!matchFence(L);
-      else if (ic === '<') { const hb = matchHtmlBlockStart(L); interrupts = hb >= 1 && hb <= 6; }
-      else if (ic === '*' || ic === '-' || ic === '_') interrupts = matchThematicBreak(L);
-      else if (ic === '>') interrupts = true;
-      else if (ic === '*' || ic === '+' || ic === '-' || isDigit(ic)) interrupts = !!matchListMarker(L);
-      if (!interrupts) {
+      if (!lineInterrupts(L)) {
         advSpaces(L, 1000);
         let text = rest(L);
         if (/^(=+|-+)[ \t]*$/.test(text)) text = '    ' + text;
@@ -1036,7 +1050,19 @@ export function parseBlocks(markdown) {
         advSpaces(L, 4);
         leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
       }
+      else if (leaf && leaf.t === 'code_block' && leaf.fenced) {
+        // blank line inside fenced code is content (spaces kept)
+        advSpaces(L, leaf.fenceIndent);
+        leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
+      }
+      else if (leaf && leaf.t === 'html_block' && leaf.blockType <= 5) {
+        // blank lines inside HTML blocks type 1-5 are part of the block
+        leaf.literal += lastLineHasNL ? '\n' : '';
+      }
       else if (leaf && leaf.t === 'html_block' && (leaf.blockType === 6 || leaf.blockType === 7)) {
+        // a blank line ends a type 6/7 HTML block; its last line loses its
+        // trailing newline in the output
+        if (leaf.literal.endsWith('\n')) leaf.literal = leaf.literal.slice(0, -1);
         finalize(leaf); tip = container; leaf = null;
       }
       // mark blank for list looseness
@@ -1103,7 +1129,7 @@ export function parseBlocks(markdown) {
             // fall through to new-block detection for this line
           } else {
             leaf.lines = leaf.lines.slice(li);
-            const h = { t: 'heading', level: st, inline: leaf.lines.join('\n').replace(/[ \t]+$/, '') };
+            const h = { t: 'heading', level: st, inline: leaf.lines.join('\n').replace(/^[ \t]+/, '').replace(/[ \t]+$/, '') };
             finalize(leaf);
             const sibs = container.children;
             sibs[sibs.length - 1] = h; h.parent = container;
@@ -1130,16 +1156,11 @@ export function parseBlocks(markdown) {
         // interrupting blocks: ATX, fence, HTML 1-6, thematic break,
         // blockquote, list (bullet, or ordered starting at 1)
         if (leaf) {
-        let interrupts = false;
-        const ic = peek(L);
-        if (ic === '#') interrupts = !!matchATX(L);
-        else if (ic === '`' || ic === '~') interrupts = !!matchFence(L);
-        else if (ic === '<') { const hb = matchHtmlBlockStart(L); interrupts = hb >= 1 && hb <= 6; }
-        else if (ic === '*' || ic === '-' || ic === '_') interrupts = matchThematicBreak(L);
-        else if (ic === '>') interrupts = true;
-        else if (ic === '*' || ic === '+' || ic === '-' || isDigit(ic)) {
+        let interrupts = lineInterrupts(L);
+        if (interrupts && isDigit(peek(L))) {
+          // an ordered list interrupts a paragraph only if it starts at 1
           const lm = matchListMarker(L);
-          if (lm) interrupts = lm.type === 'bullet' || lm.start === 1;
+          interrupts = !!lm && lm.start === 1;
         }
         if (interrupts) {
           finalize(leaf); tip = container; leaf = null;
@@ -1163,7 +1184,8 @@ export function parseBlocks(markdown) {
       const saveL = { i: L.i, col: L.col, partial: L.partial };
       advSpaces(L, 3);
       const lm0 = matchListMarker(L);
-      const sameList = lm0 && container.listType === lm0.type &&
+      // a thematic break is not a list item, even if it looks like one
+      const sameList = lm0 && !matchThematicBreak(L) && container.listType === lm0.type &&
         (lm0.type === 'bullet' ? container.bulletChar === lm0.char : container.delim === lm0.delim);
       L.i = saveL.i; L.col = saveL.col; L.partial = saveL.partial;
       if (!sameList) {
@@ -1364,7 +1386,6 @@ function renderBlock(node, refs, out) {
     }
     case 'html_block':
       out.push(node.literal);
-      if (!node.literal.endsWith('\n')) out.push('\n');
       break;
     case 'blockquote': {
       out.push('<blockquote>\n');
