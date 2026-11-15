@@ -497,7 +497,8 @@ function parseInline(src, refs, opts) {
       let j = i;
       while (j < n && src[j] === '~') j++;
       const len = j - i;
-      if (len >= 2) {
+      // GFM: one or two tildes form a delimiter; a run of 3+ is literal text
+      if (len === 1 || len === 2) {
         const [co, cc] = canOpenClose(i, len, '~');
         flushText(i);
         nodes.push({ t: 'delim', s: src.slice(i, j), ch: '~', len, canOpen: co, canClose: cc, active: true });
@@ -663,8 +664,9 @@ function processEmphasis(nodes) {
       const cand = nodes[q];
       if (cand === bottom[ch]) break;
       if (cand.t !== 'delim' || cand.ch !== ch || !cand.canOpen || !cand.active) continue;
-      if (ch === '~' && (cand.len < 2 || closer.len < 2)) continue;
-      if ((cand.canClose || closer.canOpen) && (cand.len + closer.len) % 3 === 0) continue;
+      // rule of 3: when both can open and close, the sum of lengths must not
+      // be a multiple of 3, unless both lengths are multiples of 3
+      if ((cand.canClose || closer.canOpen) && (cand.len + closer.len) % 3 === 0 && !(cand.len % 3 === 0 && closer.len % 3 === 0)) continue;
       oi = q; break;
     }
     if (oi === -1) continue;
@@ -688,7 +690,7 @@ function processEmphasis(nodes) {
     if (closer.len > 0) {
       closer.s = closer.ch.repeat(closer.len);
       nodes.splice(insertPos, 0, closer);
-      ci = insertPos;
+      ci = insertPos - 1; // re-examine the leftover closer (it may match an outer opener)
     } else {
       ci = oi;
     }
