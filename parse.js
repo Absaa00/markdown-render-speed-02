@@ -56,15 +56,15 @@ function decodeEntity(s, i) {
     while (j < n && (hex ? /[0-9a-fA-F]/.test(s[j]) : isDigit(s[j]))) j++;
     if (j === start || j >= n || s[j] !== ';') return null;
     const cp = parseInt(s.slice(start, j), hex ? 16 : 10);
-    if (cp === 0) return ['\uFFFD', j - i + 1];
+    if (cp === 0) return ['\uFFFD', j - i + 1, false];
     if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return null;
-    return [String.fromCodePoint(cp), j - i + 1];
+    return [String.fromCodePoint(cp), j - i + 1, false];
   }
   // named: &name; — kept verbatim, any alphanumeric name
   let j = i + 1;
   while (j < n && isAlnum(s[j]) && j - i < 33) j++;
   if (j < n && s[j] === ';' && j > i + 1) {
-    return [s.slice(i, j + 1), j - i + 1];
+    return [s.slice(i, j + 1), j - i + 1, true];
   }
   return null;
 }
@@ -80,7 +80,7 @@ function escapeAttr(s) {
       const e = decodeEntity(s, i);
       if (e) {
         // named entity (&name;) is kept verbatim; numeric is decoded then escaped
-        out += s.slice(start, i) + (e[0][1] !== '#' ? e[0] : escapeHtml(e[0]));
+        out += s.slice(start, i) + (e[2] ? e[0] : escapeHtml(e[0]));
         start = i + e[1]; i += e[1] - 1;
         continue;
       }
@@ -573,7 +573,7 @@ function parseInline(src, refs, opts) {
       const e = decodeEntity(src, i);
       if (e) {
         flushText(i);
-        if (e[0][1] !== '#') nodes.push({ t: 'raw', s: e[0] }); // named: verbatim
+        if (e[2]) nodes.push({ t: 'raw', s: e[0] }); // named: verbatim
         else nodes.push({ t: 'text', s: e[0] }); // numeric: decoded char
         i += e[1]; textStart = i; continue;
       }
@@ -779,9 +779,9 @@ function matchThematicBreak(L) {
 }
 function matchSetext(L) {
   const s = rest(L);
-  const m = /^([=-])[ \t]*$/.exec(s) || /^([=-]+)[ \t]*$/.exec(s);
+  const m = /^([=-]+)[ \t]*$/.exec(s);
   if (!m) return 0;
-  return m[1] === '=' ? 1 : 2;
+  return m[1][0] === '=' ? 1 : 2;
 }
 function matchATX(L) {
   const s = rest(L);
@@ -790,9 +790,11 @@ function matchATX(L) {
   if (m[2] === undefined) return { level: m[1].length, content: '' };
   let content = m[2];
   // strip trailing spaces, then closing sequence of #'s preceded by space
+  // (or a content consisting only of #'s, which is all closing sequence)
   content = content.replace(/[ \t]+$/, '');
-  const cm = /[ \t]+#+$/.exec(content);
+  const cm = /[ \t](#+)$/.exec(content);
   if (cm) content = content.slice(0, cm.index).replace(/[ \t]+$/, '');
+  else if (/^#+$/.test(content)) content = '';
   return { level: m[1].length, content };
 }
 function matchFence(L) {
@@ -995,6 +997,30 @@ export function parseBlocks(markdown) {
     if (tip !== container && tip.parent === container && (tip.t === 'paragraph' || tip.t === 'code_block' || tip.t === 'html_block')) {
       leaf = tip;
     }
+    // Lazy continuation: a non-blank line that fails the container match
+    // still continues an open paragraph, unless it starts a block that can
+    // interrupt a paragraph. Leading whitespace is stripped; a setext-like
+    // line gets 4 spaces prefixed (marked's re-lex guard, visible in output).
+    if (!matched && tip.t === 'paragraph' && !blank) {
+      const saveL = { i: L.i, col: L.col, partial: L.partial };
+      advSpaces(L, 3);
+      const ic = peek(L);
+      let interrupts = false;
+      if (ic === '#') interrupts = !!matchATX(L);
+      else if (ic === '`' || ic === '~') interrupts = !!matchFence(L);
+      else if (ic === '<') { const hb = matchHtmlBlockStart(L); interrupts = hb >= 1 && hb <= 6; }
+      else if (ic === '*' || ic === '-' || ic === '_') interrupts = matchThematicBreak(L);
+      else if (ic === '>') interrupts = true;
+      else if (ic === '*' || ic === '+' || ic === '-' || isDigit(ic)) interrupts = !!matchListMarker(L);
+      if (!interrupts) {
+        advSpaces(L, 1000);
+        let text = rest(L);
+        if (/^(=+|-+)[ \t]*$/.test(text)) text = '    ' + text;
+        tip.lines.push(text);
+        ln++; continue;
+      }
+      L.i = saveL.i; L.col = saveL.col; L.partial = saveL.partial;
+    }
     if (!matched) {
       // finalize the leaf and any containers deeper than the matched one
       finalizeUpTo(container);
@@ -1005,7 +1031,11 @@ export function parseBlocks(markdown) {
     // blank line: ends paragraph, marks blanks for lists
     if (blank) {
       if (leaf && leaf.t === 'paragraph') { finalize(leaf); tip = container; leaf = null; }
-      else if (leaf && leaf.t === 'code_block' && !leaf.fenced) { leaf.literal += '\n'; }
+      else if (leaf && leaf.t === 'code_block' && !leaf.fenced) {
+        // blank line inside indented code: keep whitespace beyond 4 cols
+        advSpaces(L, 4);
+        leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
+      }
       else if (leaf && leaf.t === 'html_block' && (leaf.blockType === 6 || leaf.blockType === 7)) {
         finalize(leaf); tip = container; leaf = null;
       }
@@ -1036,18 +1066,25 @@ export function parseBlocks(markdown) {
           leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
           ln++; continue;
         } else {
-          advSpaces(L, 4);
-          leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
-          ln++; continue;
+          // indented code ends when a line is not blank and indented < 4
+          if (indentCols(L) >= 4) {
+            advSpaces(L, 4);
+            leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
+            ln++; continue;
+          }
+          finalize(leaf); tip = container; leaf = null;
+          // fall through to new-block detection for this line
         }
       }
-      if (leaf.t === 'html_block') {
+      else if (leaf.t === 'html_block') {
         leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
         if (htmlBlockEnds(leaf.blockType, rawLine)) { finalize(leaf); tip = container; leaf = null; }
         ln++; continue;
       }
-      if (leaf.t === 'paragraph') {
+      else if (leaf.t === 'paragraph') {
         // allow up to 3 spaces before setext / interruption checks
+        // (paragraph text itself keeps its leading spaces — save position)
+        const saveP = { i: L.i, col: L.col, partial: L.partial };
         advSpaces(L, 3);
         // setext?
         const st = matchSetext(L);
@@ -1066,7 +1103,7 @@ export function parseBlocks(markdown) {
             // fall through to new-block detection for this line
           } else {
             leaf.lines = leaf.lines.slice(li);
-            const h = { t: 'heading', level: st, inline: leaf.lines.join('\n') };
+            const h = { t: 'heading', level: st, inline: leaf.lines.join('\n').replace(/[ \t]+$/, '') };
             finalize(leaf);
             const sibs = container.children;
             sibs[sibs.length - 1] = h; h.parent = container;
@@ -1108,8 +1145,8 @@ export function parseBlocks(markdown) {
           finalize(leaf); tip = container; leaf = null;
           // fall through to new-block detection (L still positioned)
         } else {
-          // continuation line: strip remaining leading spaces
-          advSpaces(L, 1000);
+          // continuation line: paragraph text keeps leading spaces verbatim
+          L.i = saveP.i; L.col = saveP.col; L.partial = saveP.partial;
           leaf.lines.push(rest(L));
           ln++; continue;
         }
@@ -1119,7 +1156,24 @@ export function parseBlocks(markdown) {
 
     // ---- 4. new block detection (loop: blockquote/list nest, then leaf) ----
     tip = container;
+    // A line that does not continue a list ends it: if the container is a
+    // list and this line does not start a new item of the same list, the
+    // list closes and the block becomes a sibling of the list.
+    if (container.t === 'list') {
+      const saveL = { i: L.i, col: L.col, partial: L.partial };
+      advSpaces(L, 3);
+      const lm0 = matchListMarker(L);
+      const sameList = lm0 && container.listType === lm0.type &&
+        (lm0.type === 'bullet' ? container.bulletChar === lm0.char : container.delim === lm0.delim);
+      L.i = saveL.i; L.col = saveL.col; L.partial = saveL.partial;
+      if (!sameList) {
+        finalize(container);
+        container = container.parent;
+        tip = container;
+      }
+    }
     for (;;) {
+      const saveLoop = { i: L.i, col: L.col, partial: L.partial };
       const ind = indentCols(L);
       if (ind >= 4) {
         // indented code (only when not interrupting a paragraph — leaf is null here)
@@ -1183,8 +1237,10 @@ export function parseBlocks(markdown) {
           else if (lm.spacesAfter <= 4) contentIndent = markerCol + lm.markerLen + lm.spacesAfter;
           else contentIndent = markerCol + lm.markerLen + 1;
           let list = null;
+          // continuing the same list (container is the list itself)
+          if (container.t === 'list') list = container;
           const sibs = container.children;
-          if (sibs.length > 0) {
+          if (!list && sibs.length > 0) {
             const prev = sibs[sibs.length - 1];
             if (prev.t === 'list' && prev.open && prev.listType === lm.type &&
                 (lm.type === 'bullet' ? prev.bulletChar === lm.char : prev.delim === lm.delim)) {
@@ -1212,6 +1268,8 @@ export function parseBlocks(markdown) {
         const tbl = tryTable(lines, ln, L, container);
         if (tbl) { ln += tbl; break; }
       }
+      // paragraph text keeps its leading spaces verbatim
+      L.i = saveLoop.i; L.col = saveLoop.col; L.partial = saveLoop.partial;
       const p = addChild(container, { t: 'paragraph', lines: [rest(L)] });
       tip = p;
       ln++; break;
@@ -1297,7 +1355,7 @@ function renderBlock(node, refs, out) {
     case 'code_block': {
       if (node.fenced) {
         const lang = (node.info.split(/[\s]/)[0] || '').replace(/\\([!"#$%&'()*+,\-.\/:;<=>?@\[\\\]^_`{|}~])/g, '$1');
-        out.push('<pre><code' + (lang ? ' class="language-' + escapeHtml(lang) + '"' : '') + '>' +
+        out.push('<pre><code' + (lang ? ' class="language-' + escapeAttr(lang) + '"' : '') + '>' +
           escapeHtml(node.literal) + '</code></pre>\n');
       } else {
         out.push('<pre><code>' + escapeHtml(node.literal) + '</code></pre>\n');
