@@ -105,9 +105,10 @@ function escapeAttr(s) {
 }
 
 // Percent-encode a link destination the way CommonMark/marked render it.
+// Valid %XX escapes are kept verbatim (not double-encoded to %25).
 function cleanUrl(href) {
   // encodeURI, then escape for the attribute (entities kept verbatim).
-  return escapeAttr(encodeURI(href));
+  return escapeAttr(href.split(/(%[0-9A-Fa-f]{2})/g).map((seg, k) => (k % 2 === 1 ? seg : encodeURI(seg))).join(''));
 }
 
 // ---------------- inline parsing ----------------
@@ -116,29 +117,32 @@ function cleanUrl(href) {
 
 const LINK_LABEL_MAX = 1000;
 
+// Unicode full case folding specials (JS toLowerCase does simple mapping
+// only: ß/ẞ fold to "ss", ligatures fold to their letters).
+const FOLD_MAP = { 'ß': 'ss', 'ẞ': 'ss', 'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl', 'ﬃ': 'ffi', 'ﬄ': 'ffl', 'ﬅ': 'st', 'ﬆ': 'st' };
+
 function normalizeLabel(raw) {
-  // collapse whitespace, unescape backslash escapes, lowercase
-  let s = raw.replace(/\\([!\"#$%&'()*+,\-.\/:;<=>?@\[\\\]^_`{|}~])/g, '$1');
+  // collapse whitespace, full case fold; backslash escapes are NOT resolved
+  // when matching labels (spec ex. 545: [foo\!] does not match [foo!])
+  let s = raw.replace(/[ßẞﬀﬁﬂﬃﬄﬅﬆ]/g, (ch) => FOLD_MAP[ch]);
   s = s.replace(/[ \t\r\n]+/g, ' ');
   return s.trim().toLowerCase();
 }
 
 function parseLabel(s, i) {
-  // s[i] === '['; parse a link label, return [labelRaw, endIndexAfterBracket] or null
+  // s[i] === '['; parse a link label, return [labelRaw, endIndexAfterBracket] or null.
+  // A label ends at the first unescaped ']'; an unescaped '[' inside the
+  // label makes it invalid (spec ex. 547/548).
   const n = s.length;
   let j = i + 1;
-  let depth = 0;
   let len = 0;
   while (j < n) {
     const c = s[j];
     if (c === '\\') { j += 2; len += 2; continue; }
-    if (c === '[') { depth++; if (depth > 0 && len > LINK_LABEL_MAX) return null; }
-    else if (c === ']') {
-      if (depth === 0) {
-        if (len === 0) return null;
-        return [s.slice(i + 1, j), j + 1];
-      }
-      depth--;
+    if (c === '[') return null;
+    if (c === ']') {
+      if (len === 0) return null;
+      return [s.slice(i + 1, j), j + 1];
     }
     j++; len++;
     if (len > LINK_LABEL_MAX) return null;
@@ -509,7 +513,7 @@ function parseInline(src, refs, opts) {
       flushText(isImage ? i : i);
       if (isImage) { nodes.push({ t: 'text', s: '!' }); }
       nodes.push({ t: 'text', s: '[' });
-      brackets.push({ idx: nodes.length - 1, image: isImage, active: true, bangIdx: isImage ? nodes.length - 2 : -1 });
+      brackets.push({ idx: nodes.length - 1, image: isImage, active: true, bangIdx: isImage ? nodes.length - 2 : -1, pos: bpos });
       i = bpos + 1; textStart = i; continue;
     }
 
@@ -528,26 +532,47 @@ function parseInline(src, refs, opts) {
       // what follows?
       let dest = null, title = null, next = i + 1;
       let formed = false;
+      let noShortcut = false; // a reference was attempted and failed: no shortcut fallback
       const after = src[i + 1];
       if (after === '(') {
         const il = parseInlineLink(src, i + 1, refs);
         if (il) { dest = il.dest; title = il.title; next = il.next; formed = true; }
+        // failed inline link: fall through to shortcut below
       } else if (after === '[') {
-        const lab = parseLabel(src, i + 1);
-        if (lab) {
-          const ref = refs.get(normalizeLabel(lab[0]));
-          if (ref) { dest = ref.dest; title = ref.title; next = lab[1]; formed = true; }
+        if (src[i + 2] === ']') {
+          // collapsed reference: [foo][] uses the bracket's own text as label.
+          // The label is the RAW source text (escapes not resolved), so that
+          // [foo\!] does not match [foo!] but [bar\\] matches [bar\\].
+          const ref = refs.get(normalizeLabel(src.slice(br.pos + 1, i)));
+          if (ref) { dest = ref.dest; title = ref.title; next = i + 3; formed = true; }
+          else noShortcut = true;
+        } else {
+          const lab = parseLabel(src, i + 1);
+          if (lab) {
+            const ref = refs.get(normalizeLabel(lab[0]));
+            if (ref) { dest = ref.dest; title = ref.title; next = lab[1]; formed = true; }
+            else noShortcut = true; // label parsed but no such reference
+          }
+          // label did not parse (unclosed/invalid): fall through to shortcut
         }
       }
-      if (!formed) {
-        // shortcut reference: label = text between brackets
-        const labelNodes = nodes.slice(br.idx + 1, closeIdx);
-        const labelRaw = renderPlain(labelNodes);
-        const ref = refs.get(normalizeLabel(labelRaw));
+      if (!formed && !noShortcut) {
+        // shortcut reference: label is the RAW source text between the
+        // brackets (escapes not resolved), same rule as collapsed refs
+        const ref = refs.get(normalizeLabel(src.slice(br.pos + 1, i)));
         if (ref) { dest = ref.dest; title = ref.title; next = i + 1; formed = true; }
       }
       if (formed) {
         const children = nodes.slice(br.idx + 1, closeIdx);
+        // a link cannot contain another link (images may contain links)
+        if (!br.image) {
+          for (const ch of children) if (ch.t === 'link') { formed = false; break; }
+        }
+      }
+      if (formed) {
+        const children = nodes.slice(br.idx + 1, closeIdx);
+        // emphasis inside the link/image text is resolved now
+        processEmphasis(children);
         // remove bracket nodes and the ']' node, and '!' if image
         let startIdx = br.idx;
         if (br.image) startIdx = br.bangIdx;
@@ -872,43 +897,61 @@ function listInterrupts(L) {
 
 // Try to parse a link reference definition starting at `first` (rest of the
 // current line); `nextLines` are the following raw lines' contents (already
-// container-stripped). Returns {dest, title, lines} (lines = lines consumed
-// beyond the first, 0..2) or null.
+// container-stripped). Returns {label, dest, title, lines} (lines = lines
+// consumed beyond the first) or null.
 function tryRefDef(first, nextLines) {
   const text = first + '\n' + nextLines.join('\n');
-  if (text[0] !== '[') return null;
-  const lab = parseLabel(text, 0);
+  // up to 3 leading spaces allowed before the label
+  let start = 0;
+  while (start < 3 && text[start] === ' ') start++;
+  if (text[start] !== '[') return null;
+  const lab = parseLabel(text, start);
   if (!lab) return null;
   const norm = normalizeLabel(lab[0]);
   if (!norm) return null;
   let j = lab[1];
   if (text[j] !== ':') return null;
   j++;
-  let linesUsed = 0;
-  // skip spaces/tabs, then at most one newline
+  // skip spaces/tabs, then at most one newline, before the destination
   while (text[j] === ' ' || text[j] === '\t') j++;
-  if (text[j] === '\n') { j++; linesUsed++; while (text[j] === ' ' || text[j] === '\t') j++; }
+  if (text[j] === '\n') { j++; while (text[j] === ' ' || text[j] === '\t') j++; }
   const d = parseDest(text, j);
   if (!d) return null;
   const [dest, j2] = d;
   j = j2;
-  while (text[j] === ' ' || text[j] === '\t') j++;
+  // a title must be separated from the destination by whitespace
+  let wsAfterDest = 0;
+  while (text[j] === ' ' || text[j] === '\t') { j++; wsAfterDest++; }
   let title = null;
   if (text[j] === '\n') {
     // title may be on the next line
-    let jSave = j;
-    j++; linesUsed++;
-    while (text[j] === ' ' || text[j] === '\t') j++;
-    const t = parseTitle(text, j);
-    if (t) { title = t[0]; j = t[1]; }
-    else { j = jSave; }
+    const jSave = j;
+    let j2b = j + 1;
+    while (text[j2b] === ' ' || text[j2b] === '\t') j2b++;
+    const t = parseTitle(text, j2b);
+    if (t) {
+      let j3 = t[1];
+      while (text[j3] === ' ' || text[j3] === '\t') j3++;
+      if (text[j3] === '\n' || text[j3] === undefined) { title = t[0]; j = j3; }
+      else j = jSave; // junk after the title: title line is not part of the def
+    } else j = jSave; // no title on the next line
   } else {
-    const t = parseTitle(text, j);
-    if (t) { title = t[0]; j = t[1]; }
+    const q = text[j];
+    if (q === '"' || q === "'" || q === '(') {
+      if (wsAfterDest === 0) return null; // title needs whitespace after dest
+      const t = parseTitle(text, j);
+      if (t) {
+        let j3 = t[1];
+        while (text[j3] === ' ' || text[j3] === '\t') j3++;
+        if (text[j3] === '\n' || text[j3] === undefined) { title = t[0]; j = j3; }
+        else return null; // junk after the title on the same line: def invalid
+      }
+    }
   }
   while (text[j] === ' ' || text[j] === '\t') j++;
   if (text[j] !== '\n' && text[j] !== undefined) return null;
-  if (linesUsed > 2) return null;
+  // lines consumed = newlines crossed up to the end of the definition
+  const linesUsed = (text.slice(0, j).match(/\n/g) || []).length;
   return { label: norm, dest, title, lines: linesUsed };
 }
 
@@ -945,7 +988,7 @@ export function parseBlocks(markdown) {
       let li = 0;
       while (li < node.lines.length) {
         const first = node.lines[li];
-        const def = tryRefDef(first, node.lines.slice(li + 1, li + 3));
+        const def = tryRefDef(first, node.lines.slice(li + 1, li + 9));
         if (!def) break;
         if (!refs.has(def.label)) refs.set(def.label, { dest: def.dest, title: def.title });
         li += 1 + def.lines;
@@ -1173,7 +1216,7 @@ export function parseBlocks(markdown) {
           // heading — the underline line becomes new content
           let li = 0;
           while (li < leaf.lines.length) {
-            const def = tryRefDef(leaf.lines[li], leaf.lines.slice(li + 1, li + 3));
+            const def = tryRefDef(leaf.lines[li], leaf.lines.slice(li + 1, li + 9));
             if (!def) break;
             if (!refs.has(def.label)) refs.set(def.label, { dest: def.dest, title: def.title });
             li += 1 + def.lines;
@@ -1191,22 +1234,9 @@ export function parseBlocks(markdown) {
             ln++; continue;
           }
         }
-        // link reference definition interrupting?
-        if (leaf && peek(L) === '[') {
-          const first = rest(L);
-          const look = [];
-          for (let k = 1; k <= 2 && ln + k < N; k++) {
-            const stripped = stripContainers(lines[ln + k]);
-            look.push(stripped === null ? lines[ln + k] : stripped);
-          }
-          const def = tryRefDef(first, look);
-          if (def) {
-            if (!refs.has(def.label)) refs.set(def.label, { dest: def.dest, title: def.title });
-            finalize(leaf); tip = container; leaf = null;
-            ln += 1 + def.lines;
-            continue;
-          }
-        }
+        // link reference definitions cannot interrupt a paragraph (spec):
+        // a def-like line mid-paragraph is plain paragraph text, handled
+        // as a continuation line below and stripped at finalize if leading.
         // interrupting blocks: ATX, fence, HTML 1-6, thematic break,
         // blockquote, list (bullet, or ordered starting at 1)
         if (leaf) {
