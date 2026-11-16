@@ -495,7 +495,12 @@ function parseInline(src, refs, opts) {
     // --- backslash escape / hard break ---
     if (c === '\\') {
       const nx = src[i + 1];
-      if (nx === '\n') { flushText(i); nodes.push({ t: 'br' }); i += 2; textStart = i; continue; }
+      if (nx === '\n') {
+        flushText(i); nodes.push({ t: 'br' }); i += 2;
+        // leading spaces/tabs of the next line are stripped after a hard break
+        while (i < n && (src[i] === ' ' || src[i] === '\t')) i++;
+        textStart = i; continue;
+      }
       if (nx !== undefined && ASCII_PUNCT.has(nx)) { flushText(i); nodes.push({ t: 'text', s: nx }); i += 2; textStart = i; continue; }
       i++; continue;
     }
@@ -508,10 +513,14 @@ function parseInline(src, refs, opts) {
       if (spaces >= 2) {
         flushText(i - spaces);
         nodes.push({ t: 'br' });
-      } else {
-        flushText(i);
-        nodes.push({ t: 'softbr' });
+        i++;
+        // leading spaces/tabs of the next line are stripped after a hard
+        // break (a soft break keeps them)
+        while (i < n && (src[i] === ' ' || src[i] === '\t')) i++;
+        textStart = i; continue;
       }
+      flushText(i);
+      nodes.push({ t: 'softbr' });
       i++; textStart = i; continue;
     }
 
@@ -1107,6 +1116,8 @@ export function parseBlocks(markdown) {
     const rawLine = lines[ln];
     const L = { s: rawLine, i: 0, col: 0, partial: 0 };
     const lastLineHasNL = ln < N - 1 || hasFinalNL;
+    // the raw line itself is blank iff it holds only spaces/tabs
+    const rawBlank = /^[ \t]*$/.test(rawLine);
 
     // ---- 1. walk open containers ----
     let container = root;
@@ -1138,7 +1149,10 @@ export function parseBlocks(markdown) {
         matched = false; break;
       } else break;
     }
-    const blank = isBlankLine(L);
+    // blank iff the raw line is whitespace-only, or nothing is left after
+    // stripping containers (a line like `>  ` leaves a space behind, so it
+    // is a content line, not a blank one)
+    const blank = rawBlank || rest(L) === '';
 
     // ---- 2. leaf continuation / finalization ----
     let leaf = null;
@@ -1425,8 +1439,11 @@ export function parseBlocks(markdown) {
         const tbl = tryTable(lines, ln, L, container);
         if (tbl) { ln += tbl; break; }
       }
-      // paragraph text keeps its leading spaces verbatim
+      // paragraph text keeps its leading spaces verbatim; a line whose
+      // remainder is only whitespace is not a paragraph (e.g. `>  ` alone
+      // in a blockquote leaves it empty)
       L.i = saveLoop.i; L.col = saveLoop.col; L.partial = saveLoop.partial;
+      if (/^[ \t]*$/.test(rest(L))) { ln++; break; }
       const p = addChild(container, { t: 'paragraph', lines: [rest(L)] });
       tip = p;
       ln++; break;
