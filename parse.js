@@ -1328,7 +1328,10 @@ export function parseBlocks(markdown) {
       if (cur2 === '<') {
         const hb = matchHtmlBlockStart(L);
         if (hb) {
-          const node = addChild(container, { t: 'html_block', blockType: hb, literal: rest(L) + (lastLineHasNL ? '\n' : '') });
+          // the first line keeps its leading spaces (up to 3) verbatim:
+          // take it from the loop-start position, before advSpaces(3)
+          const L0 = { s: L.s, i: saveLoop.i, col: saveLoop.col, partial: saveLoop.partial };
+          const node = addChild(container, { t: 'html_block', blockType: hb, literal: rest(L0) + (lastLineHasNL ? '\n' : '') });
           if (hb === 6 || hb === 7 || !htmlBlockEnds(hb, rawLine)) tip = node;
           else finalize(node); // single-line block ending on this line
           ln++; break;
@@ -1392,6 +1395,22 @@ export function parseBlocks(markdown) {
 
   // finalize remaining open blocks
   while (tip !== root) { const p = tip.parent; finalize(tip); tip = p; }
+
+  // HTML blocks type 6/7 drop their trailing newline unless they are the
+  // last block of the document (types 1-5 always keep it)
+  {
+    const flat = [];
+    (function walk(node) {
+      for (const ch of node.children || []) { flat.push(ch); walk(ch); }
+    })(root);
+    for (let k = 0; k < flat.length; k++) {
+      const nd = flat[k];
+      if (nd.t === 'html_block' && nd.blockType === 6 && k < flat.length - 1 &&
+          nd.literal.endsWith('\n')) {
+        nd.literal = nd.literal.slice(0, -1);
+      }
+    }
+  }
 
   return { root, refs };
 
