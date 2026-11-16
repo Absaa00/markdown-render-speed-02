@@ -226,6 +226,20 @@ function parseInlineLink(s, i, refs) {
   return null;
 }
 
+// An autolink inside link text renders as plain text when the enclosing
+// link forms (no nested <a>): replace auto link nodes with their children.
+function flattenAutoLinks(nodes) {
+  for (let q = 0; q < nodes.length; q++) {
+    const nd = nodes[q];
+    if (nd.t === 'link' && nd.auto === 'ext') {
+      const kids = nd.children || [{ t: 'text', s: nd.href }];
+      flattenAutoLinks(kids);
+      nodes.splice(q, 1, ...kids);
+      q += kids.length - 1;
+    } else if (nd.children) flattenAutoLinks(nd.children);
+  }
+}
+
 function renderPlain(nodes) {
   // alt text: raw text of children, no formatting
   let out = '';
@@ -388,7 +402,7 @@ function tryExtAutolink(s, i) {
             const emailPart = cand.slice(sm[0].length).split('/')[0];
             if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(emailPart)
                 && /[A-Za-z]/.test(emailPart.slice(emailPart.lastIndexOf('.') + 1))) {
-              return { node: { t: 'link', href: cand, title: null, auto: true, children: [{ t: 'text', s: cand }] }, next: i + cand.length };
+              return { node: { t: 'link', href: cand, title: null, auto: 'ext', children: [{ t: 'text', s: cand }] }, next: i + cand.length };
             }
           }
         }
@@ -405,14 +419,15 @@ function tryExtAutolink(s, i) {
       while (cand.endsWith('.')) { cand = cand.slice(0, -1); d--; }
       if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(cand)
           && /[A-Za-z]/.test(cand.slice(cand.lastIndexOf('.') + 1))) {
-        return { node: { t: 'link', href: 'mailto:' + cand, title: null, auto: true, children: [{ t: 'text', s: cand }] }, next: d };
+        return { node: { t: 'link', href: 'mailto:' + cand, title: null, auto: 'ext', children: [{ t: 'text', s: cand }] }, next: d };
       }
     }
     return null;
   }
-  // URL: scan until whitespace or '<'
+  // URL: scan until whitespace, '<', or ']' (a ']' closes link text, so
+  // a bare URL never swallows the closing bracket of an enclosing link)
   let j = i;
-  while (j < n && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n' && s[j] !== '<') j++;
+  while (j < n && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n' && s[j] !== '<' && s[j] !== ']') j++;
   let url = s.slice(i, j);
   if (isWww) {
     // domain must contain a dot with valid TLD-ish part
@@ -449,7 +464,7 @@ function tryExtAutolink(s, i) {
   // must still contain a valid domain after trimming
   if (isWww && !/^www\.[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/.test(url)) return null;
   const href = isWww ? 'http://' + url : url;
-  return { node: { t: 'link', href, title: null, auto: true, children: [{ t: 'text', s: url }] }, next: i + url.length };
+  return { node: { t: 'link', href, title: null, auto: 'ext', children: [{ t: 'text', s: url }] }, next: i + url.length };
 }
 
 // ---- main inline scanner ----
@@ -645,6 +660,8 @@ function parseInline(src, refs, opts) {
       }
       if (formed) {
         const children = nodes.slice(br.idx + 1, closeIdx);
+        // autolinks inside link text become plain text (no nested <a>)
+        if (!br.image) flattenAutoLinks(children);
         // emphasis inside the link/image text is resolved now
         processEmphasis(children);
         // remove bracket nodes and the ']' node, and '!' if image
@@ -817,6 +834,20 @@ function adv(L, n) {
 function rest(L) {
   if (L.partial > 0) return ' '.repeat(L.partial) + L.s.slice(L.i + 1);
   return L.s.slice(L.i);
+}
+// rest() with leading tabs expanded to spaces (tab stops every 4 cols,
+// relative to the cursor's current column). Used for fenced-code content
+// when the line sits inside a container (col > 0); at top level a tab
+// stays literal (marked keeps it).
+function restExpanded(L) {
+  if (L.partial > 0) return rest(L);
+  let col = L.col, out = '', k = L.i;
+  while (k < L.s.length && (L.s[k] === ' ' || L.s[k] === '\t')) {
+    if (L.s[k] === '\t') { const w = 4 - (col % 4); out += ' '.repeat(w); col += w; }
+    else { out += ' '; col++; }
+    k++;
+  }
+  return out + L.s.slice(k);
 }
 function isBlankLine(L) {
   for (let k = L.i; k < L.s.length; k++) {
@@ -1268,7 +1299,7 @@ export function parseBlocks(markdown) {
       else if (leaf && leaf.t === 'code_block' && leaf.fenced) {
         // blank line inside fenced code is content (spaces kept)
         advWsCols(L, leaf.fenceIndent);
-        leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
+        leaf.literal += (L.col > 0 ? restExpanded(L) : rest(L)) + (lastLineHasNL ? '\n' : '');
         structural = false;
       }
       else if (leaf && leaf.t === 'html_block' && leaf.blockType <= 5) {
@@ -1312,7 +1343,7 @@ export function parseBlocks(markdown) {
           }
           L.i = save.i; L.col = save.col; L.partial = save.partial;
           advWsCols(L, leaf.fenceIndent);
-          leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
+          leaf.literal += (L.col > 0 ? restExpanded(L) : rest(L)) + (lastLineHasNL ? '\n' : '');
           ln++; continue;
         } else {
           // indented code ends when a line is not blank and indented < 4
