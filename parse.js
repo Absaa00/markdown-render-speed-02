@@ -1471,8 +1471,25 @@ export function parseBlocks(markdown) {
             ln++; continue;
           }
           L.i = save.i; L.col = save.col; L.partial = save.partial;
-          advWsCols(L, leaf.fenceIndent);
-          let content = (L.col > 0 ? restExpanded(L) : rest(L));
+          // Fence-indent strip removes SPACE characters only. A tab
+          // inside the indent region is dropped whole (doc-17: a
+          // 3-col strip swallows a tab at col 0 entirely); a tab past
+          // the indent stays raw (doc-38; doc-13 L382 keeps the spaces
+          // plus the raw tab). Tabs reached via container stripping
+          // still expand (doc-13 L182), so the expand/raw choice keys
+          // on the column before the strip, not after it.
+          const colBeforeStrip = L.col;
+          let stripped = 0;
+          while (stripped < leaf.fenceIndent) {
+            if (peek(L) !== ' ') break;
+            adv(L, 1); stripped++;
+          }
+          if (peek(L) === '\t' && stripped < leaf.fenceIndent) {
+            L.col += 4 - (L.col % 4); L.i++;
+          }
+          let content;
+          if (colBeforeStrip > 0) content = restExpanded(L);
+          else content = rest(L);
           if (lineHadBq && !afterBq && leaf.fenceIndent === 0 && (L.partial > 0 || peek(L) === '\t')) {
             // a tab directly after blockquote markers in fenced code
             // renders as 2 spaces (doc-05/08/09/14/19/30/40; the rust
