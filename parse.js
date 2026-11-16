@@ -293,9 +293,12 @@ function matchTag(s, i) {
     // attribute name: first char [A-Za-z_:] only
     if (!/[A-Za-z_:]/.test(s[j])) return -1;
     while (j < n && /[A-Za-z0-9_.:-]/.test(s[j])) j++;
-    while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
-    if (j < n && s[j] === '=') {
-      j++;
+    // optional value: whitespace is only consumed when it precedes '=',
+    // so it still counts as the separator for the next attribute
+    let k = j;
+    while (k < n && (s[k] === ' ' || s[k] === '\t' || s[k] === '\n')) k++;
+    if (k < n && s[k] === '=') {
+      j = k + 1;
       while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
       if (j >= n) return -1;
       const q = s[j];
@@ -912,19 +915,37 @@ function matchFence(L) {
   if (fence[0] === '`' && info.includes('`')) return null;
   return { char: fence[0], len: fence.length, info: info.trim() };
 }
+// columns spanned by a run of spaces/tabs starting at absolute column startCol
+function wsCols(startCol, ws) {
+  let col = startCol;
+  for (let k = 0; k < ws.length; k++) {
+    if (ws[k] === '\t') col += 4 - (col % 4);
+    else col++;
+  }
+  return col - startCol;
+}
 function matchListMarker(L) {
   const s = rest(L);
   let m = /^([*+-])([ \t]+|$)/.exec(s);
   if (m) {
-    const spaces = m[2] === '' ? 0 : m[2].length;
+    // spacesAfter is counted in columns, not characters (tabs!)
+    const spaces = m[2] === '' ? 0 : wsCols(L.col + 1, m[2]);
     return { type: 'bullet', char: m[1], markerLen: 1, spacesAfter: spaces };
   }
   m = /^(\d{1,9})([.)])([ \t]+|$)/.exec(s);
   if (m) {
-    const spaces = m[3] === '' ? 0 : m[3].length;
+    const spaces = m[3] === '' ? 0 : wsCols(L.col + m[1].length + 1, m[3]);
     return { type: 'ordered', start: parseInt(m[1], 10), delim: m[2], markerLen: m[1].length + 1, spacesAfter: spaces };
   }
   return null;
+}
+// text after a list marker and its following spaces (column-aware, so tabs
+// are consumed correctly); used to tell an empty item from a non-empty one
+function afterMarker(L, lm) {
+  const c = { s: L.s, i: L.i, col: L.col, partial: L.partial };
+  adv(c, lm.markerLen);
+  if (lm.spacesAfter > 0) advSpaces(c, lm.spacesAfter <= 4 ? lm.spacesAfter : 1);
+  return rest(c);
 }
 
 // Does the line (at L, after <=3 spaces) start a block that can interrupt
@@ -950,8 +971,7 @@ function listInterrupts(L) {
   const lm = matchListMarker(L);
   if (!lm) return false;
   if (lm.spacesAfter === 0) return false;
-  const after = rest(L).slice(lm.markerLen + (lm.spacesAfter <= 4 ? lm.spacesAfter : 1));
-  if (after.trim() === '') return false;
+  if (afterMarker(L, lm).trim() === '') return false;
   if (lm.type === 'ordered' && lm.start !== 1) return false;
   return true;
 }
@@ -1029,15 +1049,22 @@ export function parseBlocks(markdown) {
   // last finalized HTML block: its trailing newline is dropped if the next
   // line is blank (marked's HTML-block text ends before a blank line)
   let pendingHtml = null;
+  // a structural blank line was seen since the last block was added; the
+  // next block added attributes the blank to its parent (item -> loose item,
+  // list -> loose list) and clears the flag
+  let blankPending = false;
 
   function addChild(parent, node) {
     node.parent = parent;
     node.open = true;
     node.children = node.children || [];
-    if (parent.t === 'item' && parent._blankSeen && parent.children.length > 0) {
-      parent._sawBlankBetween = true;
+    if (blankPending) {
+      if (parent.children.length > 0) {
+        if (parent.t === 'item') parent._sawBlankBetween = true;
+        else if (parent.t === 'list') parent._blankBetweenItems = true;
+      }
+      blankPending = false;
     }
-    if (parent.t === 'item') parent._blankSeen = false;
     parent.children.push(node);
     return node;
   }
@@ -1077,6 +1104,10 @@ export function parseBlocks(markdown) {
       if (!node.fenced) {
         // strip blank lines at the end, keep the final newline of the last content line
         while (node.literal.endsWith('\n\n')) node.literal = node.literal.slice(0, -1);
+      } else if (node.literal.endsWith('\n\n')) {
+        // fenced: literal is join(lines,'\n') + '\n' iff the last line is
+        // non-empty, so exactly one trailing newline is dropped
+        node.literal = node.literal.slice(0, -1);
       }
     }
   }
@@ -1104,7 +1135,7 @@ export function parseBlocks(markdown) {
         else return null;
       } else if (blk.t === 'item') {
         if (isBlankLine(L)) continue;
-        if (L.col + indentCols(L) >= blk.contentIndent) adv(L, blk.contentIndent - L.col);
+        if (indentCols(L) >= blk.contentOffset) adv(L, blk.contentOffset);
         else return null;
       } else break;
     }
@@ -1140,10 +1171,10 @@ export function parseBlocks(markdown) {
         matched = false; break;
       } else if (last.t === 'item') {
         if (isBlankLine(L)) { cur = last; container = last; continue; }
-        // contentIndent is an absolute column; compare against the column
-        // of the first non-space char of this line
-        if (L.col + indentCols(L) >= last.contentIndent) {
-          adv(L, last.contentIndent - L.col);
+        // contentOffset is relative to the column after the item's ancestor
+        // containers on this line, not an absolute document column
+        if (indentCols(L) >= last.contentOffset) {
+          adv(L, last.contentOffset);
           cur = last; container = last; continue;
         }
         matched = false; break;
@@ -1168,17 +1199,23 @@ export function parseBlocks(markdown) {
       advSpaces(L, 3);
       let interrupts = lineInterrupts(L);
       if (!interrupts) {
-        // a line starting a new item of the list this paragraph belongs to
-        // is not a lazy continuation either
+        // a non-empty list marker interrupts when the paragraph sits inside
+        // a list item, whatever its number or delimiter (a change of
+        // delimiter starts a new list); an empty marker interrupts only
+        // for the same list (an empty item of another list cannot)
         const lm = matchListMarker(L);
         if (lm) {
           let p = tip.parent;
           while (p && p.t !== 'item' && p.t !== 'document') p = p.parent;
           if (p && p.t === 'item') {
-            const al = p.parent;
-            if (al && al.t === 'list' && al.listType === lm.type &&
-                (lm.type === 'bullet' ? al.bulletChar === lm.char : al.delim === lm.delim)) {
+            if (lm.spacesAfter > 0 && afterMarker(L, lm).trim() !== '') {
               interrupts = true;
+            } else {
+              const al = p.parent;
+              if (al && al.t === 'list' && al.listType === lm.type &&
+                  (lm.type === 'bullet' ? al.bulletChar === lm.char : al.delim === lm.delim)) {
+                interrupts = true;
+              }
             }
           }
         }
@@ -1207,20 +1244,26 @@ export function parseBlocks(markdown) {
         pendingHtml.literal = pendingHtml.literal.slice(0, -1);
       }
       pendingHtml = null;
+      // a blank line is structural unless it is content of fenced/indented
+      // code or of an HTML block type 1-5
+      let structural = true;
       if (leaf && leaf.t === 'paragraph') { finalize(leaf); tip = container; leaf = null; }
       else if (leaf && leaf.t === 'code_block' && !leaf.fenced) {
         // blank line inside indented code: keep whitespace beyond 4 cols
         advSpaces(L, 4);
         leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
+        structural = false;
       }
       else if (leaf && leaf.t === 'code_block' && leaf.fenced) {
         // blank line inside fenced code is content (spaces kept)
         advSpaces(L, leaf.fenceIndent);
         leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
+        structural = false;
       }
       else if (leaf && leaf.t === 'html_block' && leaf.blockType <= 5) {
         // blank lines inside HTML blocks type 1-5 are part of the block
         leaf.literal += lastLineHasNL ? '\n' : '';
+        structural = false;
       }
       else if (leaf && leaf.t === 'html_block' && (leaf.blockType === 6 || leaf.blockType === 7)) {
         // a blank line ends a type 6/7 HTML block; its last line loses its
@@ -1228,10 +1271,16 @@ export function parseBlocks(markdown) {
         if (leaf.literal.endsWith('\n')) leaf.literal = leaf.literal.slice(0, -1);
         finalize(leaf); tip = container; leaf = null;
       }
-      // mark blank for list looseness: only the innermost item directly
-      // containing this blank line (a blank inside a nested block does not
-      // make the outer list loose)
-      if (container.t === 'item') container._blankSeen = true;
+      // a structural blank line marks list looseness for the next block
+      // added — but only when the blank line sits directly in an item or
+      // a list; a blank inside a blockquote separates blocks of the
+      // blockquote, not of the enclosing list item
+      if (structural && (container.t === 'item' || container.t === 'list')) blankPending = true;
+      // a blank line closes an empty list item (its content, if any, then
+      // belongs to the enclosing block, not the item)
+      if (tip.t === 'item' && tip.children.length === 0 && tip.open) {
+        finalize(tip); tip = tip.parent;
+      }
       ln++;
       continue;
     }
@@ -1403,10 +1452,13 @@ export function parseBlocks(markdown) {
         const lm = matchListMarker(L);
         if (lm) {
           const markerCol = L.col;
-          let contentIndent;
-          if (lm.spacesAfter === 0) contentIndent = markerCol + lm.markerLen + 1;
-          else if (lm.spacesAfter <= 4) contentIndent = markerCol + lm.markerLen + lm.spacesAfter;
-          else contentIndent = markerCol + lm.markerLen + 1;
+          // content offset is relative to this line's container base
+          // (saveLoop.col), not an absolute document column
+          const markerIndentRel = markerCol - saveLoop.col;
+          let contentOffset;
+          if (lm.spacesAfter === 0) contentOffset = markerIndentRel + lm.markerLen + 1;
+          else if (lm.spacesAfter <= 4) contentOffset = markerIndentRel + lm.markerLen + lm.spacesAfter;
+          else contentOffset = markerIndentRel + lm.markerLen + 1;
           let list = null;
           // continuing the same list (container is the list itself)
           if (container.t === 'list') list = container;
@@ -1420,17 +1472,17 @@ export function parseBlocks(markdown) {
           }
           if (!list) {
             list = addChild(container, { t: 'list', listType: lm.type, start: lm.type === 'ordered' ? lm.start : 0, delim: lm.delim || '', bulletChar: lm.char || '', tight: true });
-          } else if (list.children.length > 0) {
-            // blank line between items makes the list loose
-            const prevItem = list.children[list.children.length - 1];
-            if (prevItem._blankSeen) list._blankBetweenItems = true;
-            prevItem._blankSeen = false;
           }
-          const item = addChild(list, { t: 'item', markerOffset: markerCol, contentIndent, _blankSeen: false, _sawBlankBetween: false });
+          const item = addChild(list, { t: 'item', markerOffset: markerCol, contentOffset, _sawBlankBetween: false });
           container = item; tip = item;
           adv(L, lm.markerLen);
           if (lm.spacesAfter > 0) advSpaces(L, lm.spacesAfter <= 4 ? lm.spacesAfter : 1);
-          if (isBlankLine(L)) { ln++; break; }
+          if (isBlankLine(L)) {
+            // an empty item's content starts one column after the marker,
+            // whatever the whitespace after the marker was
+            item.contentOffset = markerIndentRel + lm.markerLen + 1;
+            ln++; break;
+          }
           continue;
         }
       }
@@ -1496,7 +1548,9 @@ export function parseBlocks(markdown) {
     while (r < linesArr.length) {
       const rowLine = linesArr[r];
       if (/^[ \t]*$/.test(rowLine)) break;
-      if (!rowLine.includes('|')) break;
+      // a line starting a blockquote ends the table; a plain line without
+      // '|' is still a row (a single cell, the rest empty)
+      if (/^[ \t]{0,3}>/.test(rowLine)) break;
       const row = splitTableRow(rowLine);
       if (row === null) break;
       node.rows.push(row.map(c => c.trim()));
