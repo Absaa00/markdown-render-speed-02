@@ -403,7 +403,11 @@ function tryAutolink(s, i) {
 
 // GFM extended autolink: www. / http(s):// / email in plain text.
 // Returns {node, next} or null. s[i] is the start char.
-function tryExtAutolink(s, i, hasUOpener) {
+// inLiveBracket: an active '[' whose label so far holds no (non-auto) link,
+// so a ']' after the URL could still close that link — the URL must stop
+// there. When every enclosing '[' is already dead (its label holds a link),
+// the ']' is literal text and the URL runs past it (doc-08/12/36/37).
+function tryExtAutolink(s, i, hasUOpener, inLiveBracket) {
   const n = s.length;
   let isWww = false, isHttp = false, isEmail = false;
   let start = i;
@@ -478,10 +482,10 @@ function tryExtAutolink(s, i, hasUOpener) {
     }
     return null;
   }
-  // URL: scan until whitespace, '<', or ']' (a ']' closes link text, so
-  // a bare URL never swallows the closing bracket of an enclosing link)
+  // URL: scan until whitespace or '<'; a ']' stops the scan only when it
+  // could still close a live enclosing link (see inLiveBracket above).
   let j = i;
-  while (j < n && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n' && s[j] !== '<' && s[j] !== ']') j++;
+  while (j < n && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n' && s[j] !== '<' && !(inLiveBracket && s[j] === ']')) j++;
   let url = s.slice(i, j);
   if (isWww) {
     // domain must contain a dot with valid TLD-ish part
@@ -491,6 +495,23 @@ function tryExtAutolink(s, i, hasUOpener) {
     const m = /^https?:\/\/[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*/i.exec(url);
     if (!m) return null;
   }
+  // Paren matching over the candidate: a '(' is matched by a later ')',
+  // a ')' is matched by an earlier '('; the rest are unmatched.
+  const parenInfo = (str) => {
+    const stack = []; const unmatchedClose = new Set();
+    for (let p = 0; p < str.length; p++) {
+      if (str[p] === '(') stack.push(p);
+      else if (str[p] === ')') { if (stack.length) stack.pop(); else unmatchedClose.add(p); }
+    }
+    return { firstUnclosedOpen: stack.length ? stack[0] : -1, unmatchedClose };
+  };
+  // A '(' whose group never closes inside the candidate truncates the URL
+  // there: ...io)](https://npmjs.com/heading keeps ...io)] (doc-08), while
+  // a closed group ...)](./docs/create.md) is kept whole (doc-12).
+  {
+    const pi = parenInfo(url);
+    if (pi.firstUnclosedOpen !== -1) url = url.slice(0, pi.firstUnclosedOpen);
+  }
   // trim trailing punctuation per GFM
   let end = url.length;
   while (end > 0) {
@@ -498,10 +519,11 @@ function tryExtAutolink(s, i, hasUOpener) {
     if ('?!.,:*_~'.includes(c)) { end--; continue; }
     if (c === "'") { end--; continue; }
     if (c === ')') {
-      // balance parens in the url
-      let open = 0, close = 0;
-      for (let q = 0; q < end; q++) { if (url[q] === '(') open++; else if (url[q] === ')') close++; }
-      if (close > open) { end--; continue; }
+      // a trailing ')' is dropped only when it has no matching '(';
+      // a matched pair is kept even if an unmatched ')' sits further left
+      // (doc-12: ...)](./docs/create.md) keeps its final ')')
+      const pi = parenInfo(url.slice(0, end));
+      if (pi.unmatchedClose.has(end - 1)) { end--; continue; }
       break;
     }
     if (c === ';') {
@@ -780,7 +802,10 @@ function parseInline(src, refs, opts) {
       const prev = i > 0 ? src[i - 1] : '';
       const prevOk = prev === '' || isUnicodeWs(prev) || isPunct(prev);
       if (prevOk) {
-        const ea = tryExtAutolink(src, i, nodes.some(nd => nd.t === 'delim' && nd.ch === '_' && nd.canOpen && nd.active));
+        // a bracket is "live" for URL purposes when its label so far holds
+        // no (non-auto) link — only then can a ']' after the URL close it
+        const inLiveBracket = brackets.some(b => b.active && !nodes.slice(b.idx + 1).some(nd => nd.t === 'link' && !nd.auto));
+        const ea = tryExtAutolink(src, i, nodes.some(nd => nd.t === 'delim' && nd.ch === '_' && nd.canOpen && nd.active), inLiveBracket);
         if (ea) { flushText(i); nodes.push(ea.node); i = ea.next; textStart = i; continue; }
       }
       i++; continue;
