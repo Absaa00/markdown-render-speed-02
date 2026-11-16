@@ -1215,6 +1215,9 @@ export function parseBlocks(markdown) {
         // fenced: literal is join(lines,'\n') + '\n' iff the last line is
         // non-empty, so exactly one trailing newline is dropped
         node.literal = node.literal.slice(0, -1);
+      } else if (node.literal === '\n') {
+        // a fence whose only content is a single blank line renders empty
+        node.literal = '';
       }
     }
   }
@@ -1334,8 +1337,10 @@ export function parseBlocks(markdown) {
     // blank line: ends paragraph, marks blanks for lists
     if (blank) {
       // an HTML block finalized on the previous line loses its trailing
-      // newline when a blank line follows it
-      if (pendingHtml && pendingHtml.literal.endsWith('\n')) {
+      // newline when a truly empty line follows it; a blank line of
+      // only spaces or tabs does not strip it (any type: cm-183 type 2,
+      // doc-02/05 type 1 drop it, doc-15/19 keep it after ws-only lines)
+      if (pendingHtml && rawLine === '' && pendingHtml.literal.endsWith('\n')) {
         pendingHtml.literal = pendingHtml.literal.slice(0, -1);
       }
       pendingHtml = null;
@@ -1642,10 +1647,22 @@ export function parseBlocks(markdown) {
     let r = idx + 2;
     while (r < linesArr.length) {
       const rowLine = linesArr[r];
+      // a line of only whitespace that contains a tab is a row of empty
+      // cells (marked does not treat it as a blank line); a truly empty
+      // or spaces-only line ends the table
+      if (/^[ \t]+$/.test(rowLine) && rowLine.includes('\t')) {
+        node.rows.push(['']);
+        r++;
+        continue;
+      }
       if (/^[ \t]*$/.test(rowLine)) break;
-      // a line starting a blockquote ends the table; a plain line without
-      // '|' is still a row (a single cell, the rest empty)
+      // a line starting a block that can interrupt a paragraph ends the
+      // table; a plain line without '|' is still a row (a single cell,
+      // the rest empty)
       if (/^[ \t]{0,3}>/.test(rowLine)) break;
+      const Lc2 = { s: rowLine, i: 0, col: 0, partial: 0 };
+      advSpaces(Lc2, 3);
+      if (lineInterrupts(Lc2)) break;
       const row = splitTableRow(rowLine);
       if (row === null) break;
       node.rows.push(row.map(c => c.trim()));
