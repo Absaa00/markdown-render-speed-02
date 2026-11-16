@@ -1428,12 +1428,15 @@ export function parseBlocks(markdown) {
     }
     const header = splitTableRow(headerLine);
     if (header === null) return 0;
+    // delimiter must have the same number of cells as the header
+    if (aligns.length !== header.length) return 0;
     const node = { t: 'table', header: header.map(h => h.trim()), aligns, rows: [] };
     addChild(containerNode, node);
     let r = idx + 2;
     while (r < linesArr.length) {
       const rowLine = linesArr[r];
       if (/^[ \t]*$/.test(rowLine)) break;
+      if (!rowLine.includes('|')) break;
       const row = splitTableRow(rowLine);
       if (row === null) break;
       node.rows.push(row.map(c => c.trim()));
@@ -1532,18 +1535,22 @@ function renderBlock(node, refs, out) {
         out.push('<th' + (al ? ' align="' + al + '"' : '') + '>' +
           renderInline(parseInline(node.header[k], refs)) + '</th>\n');
       }
-      out.push('</tr>\n</thead>\n<tbody>');
-      for (const row of node.rows) {
-        out.push('<tr>\n');
-        for (let k = 0; k < node.header.length; k++) {
-          const al = node.aligns[k];
-          const cell = k < row.length ? row[k] : '';
-          out.push('<td' + (al ? ' align="' + al + '"' : '') + '>' +
-            renderInline(parseInline(cell, refs)) + '</td>\n');
+      out.push('</tr>\n</thead>\n');
+      if (node.rows.length > 0) {
+        out.push('<tbody>');
+        for (const row of node.rows) {
+          out.push('<tr>\n');
+          for (let k = 0; k < node.header.length; k++) {
+            const al = node.aligns[k];
+            const cell = k < row.length ? row[k] : '';
+            out.push('<td' + (al ? ' align="' + al + '"' : '') + '>' +
+              renderInline(parseInline(cell, refs)) + '</td>\n');
+          }
+          out.push('</tr>\n');
         }
-        out.push('</tr>\n');
+        out.push('</tbody>');
       }
-      out.push('</tbody></table>\n');
+      out.push('</table>\n');
       break;
     }
   }
