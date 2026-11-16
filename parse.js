@@ -1526,8 +1526,20 @@ export function parseBlocks(markdown) {
         // keeps 1, doc-06; `>    Naïve` keeps 3, doc-22), but when
         // no container matched at all (walk stopped at column 0) the
         // leading spaces are stripped entirely (cm-238/291/312).
+        // Exception: a line indented 4+ columns is lexed by marked
+        // as indented code whose indent-stripped text merges into
+        // the paragraph (list items re-lex with state.top=false, so
+        // the paragraph rule is off; same strip in nested
+        // blockquotes, bq-nest-4sp) — strip exactly 4 columns
+        // (doc-22 item 19: `>     Same` -> `Same`).
         let text;
-        if (saveL.col > 0 || saveL.partial > 0) text = restExpanded(saveL);
+        if (saveL.col > 0 || saveL.partial > 0) {
+          if (indentCols(saveL) >= 4) {
+            const c = { s: saveL.s, i: saveL.i, col: saveL.col, partial: saveL.partial };
+            adv(c, 4);
+            text = restExpanded(c);
+          } else text = restExpanded(saveL);
+        }
         else { advSpaces(L, 1000); text = rest(L); }
         if (/^(=+|-+)[ \t]*$/.test(text)) text = '    ' + text;
         tip.lines.push(text);
