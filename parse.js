@@ -429,8 +429,10 @@ function tryExtAutolink(s, i, hasUOpener) {
             if (k > j + 1) end = k;
           }
           let cand = s.slice(i, end);
-          // a trailing _ that closes an open _ emphasis is not part of the address
-          if (hasUOpener && cand.endsWith('_')) cand = cand.slice(0, -1);
+          // trailing _ (one or two) that close an open _ emphasis are not
+          // part of the address (a __ strong closer contributes two);
+          // re-strip after punctuation is trimmed (a.b_. case)
+          if (hasUOpener) { while (cand.endsWith('_')) cand = cand.slice(0, -1); }
           // trim trailing punctuation (never _ or -) + entity rule
           while (cand.length > 0) {
             const c = cand[cand.length - 1];
@@ -442,6 +444,7 @@ function tryExtAutolink(s, i, hasUOpener) {
             }
             break;
           }
+          if (hasUOpener) { while (cand.endsWith('_')) cand = cand.slice(0, -1); }
           if (cand.length > sm[0].length) {
             const emailPart = cand.slice(sm[0].length).split('/')[0];
             if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(emailPart)
@@ -459,10 +462,15 @@ function tryExtAutolink(s, i, hasUOpener) {
       let d = j + 1;
       while (d < n && /[A-Za-z0-9._-]/.test(s[d])) d++;
       let cand = s.slice(i, d);
-      // a trailing _ that closes an open _ emphasis is not part of the address
-      if (hasUOpener && cand.endsWith('_')) { cand = cand.slice(0, -1); d--; }
-      // trim trailing dots (a.b. links as a.b + '.')
-      while (cand.endsWith('.')) { cand = cand.slice(0, -1); d--; }
+      // trailing _ (one or two) that close an open _ emphasis are not part
+      // of the address (a __ strong closer contributes two); a trailing '.'
+      // after them is not either (a.b_. links as a.b)
+      let changed = true;
+      while (changed) {
+        changed = false;
+        if (hasUOpener && cand.endsWith('_')) { cand = cand.slice(0, -1); d--; changed = true; }
+        if (cand.endsWith('.')) { cand = cand.slice(0, -1); d--; changed = true; }
+      }
       if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(cand)
           && /[A-Za-z]/.test(cand.slice(cand.lastIndexOf('.') + 1))) {
         return { node: { t: 'link', href: 'mailto:' + cand, title: null, auto: 'ext', children: [{ t: 'text', s: cand }] }, next: d };
