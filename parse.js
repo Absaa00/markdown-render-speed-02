@@ -475,6 +475,7 @@ function tryExtAutolink(s, i, hasUOpener) {
 function parseInline(src, refs, opts) {
   const nodes = [];          // node list
   const brackets = [];       // {idx, image, active}
+  const guardedClose = new Set(); // ']' positions where a code-span closer search aborted (see code-span branch)
   const n = src.length;
   let i = 0;
   let textStart = 0;
@@ -553,11 +554,16 @@ function parseInline(src, refs, opts) {
       const run = j - i;
       // find matching run; stop at a ']' followed by '(' or '[' while a
       // bracket is active — that ']' closes link text, so the backtick run
-      // must not swallow it (the run then stays literal)
+      // must not swallow it (the run then stays literal). A ']' where an
+      // earlier run's search already aborted is also protected: e.g.
+      // [docs each ``url`](...) — the failed `` run aborts at ']', so the
+      // lone '`' before ']' must not swallow it either. But a lone '`'
+      // with no earlier abort (cm-525 [foo`](/uri)`) DOES swallow ']'.
       let k = j, found = -1;
       while (k < n) {
         if (src[k] === ']' && (src[k + 1] === '(' || src[k + 1] === '[') &&
-            k > j && src[k - 1] === '`' && brackets.some(b => b.active)) break;
+            k > j && src[k - 1] === '`' && brackets.some(b => b.active)) { guardedClose.add(k); break; }
+        if (src[k] === ']' && guardedClose.has(k)) break;
         if (src[k] === '`') {
           let m = k;
           while (m < n && src[m] === '`') m++;
