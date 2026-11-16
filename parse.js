@@ -893,6 +893,36 @@ function parseInline(src, refs, opts) {
 }
 
 // ---- emphasis / strikethrough resolution ----
+// Marked emStrong deviation (verified against the marked oracle, probeB/C):
+// an outer em/strong does NOT form when a direct inner em/strong child of a
+// DIFFERENT length is immediately followed by text starting with a Unicode
+// letter or digit — the inner closer is then both-flanking and blocks the
+// outer match (*a **b**c* stays literal, *a **b** c* / *a **b*** form;
+// punctuation after the inner closer does not block; equal lengths do not
+// block). Only '*' is affected here ('_' shapes already match marked).
+const WORD_START = /^[\p{L}\p{N}]/u;
+// A direct inner em/strong child blocks the outer wrapper only when ALL hold:
+// - its length EXCEEDS the outer wrapper's used length (outer em + inner
+//   strong only: *a **b**c* stays literal; **a *b*c**-shaped outer-strong
+//   cases form in marked — doc-01/11/26/30 — so they are NOT blocked here;
+//   the B2 shape **a *b*c** is a known unhandled gap, see probeB)
+// - its own opener was open-only (could not close: preceded by space/start,
+//   e.g. ` **code**`; a both-flanking opener like `foo**bar**` does not block — cm-411)
+// - it is immediately followed by text starting with a Unicode letter/digit
+// - its opener run is not the outer opener's own run (***b**c* shares it)
+function blockedByInner(nodes, oi, ci, useLen, ch, candNode) {
+  for (let k = oi + 1; k < ci; k++) {
+    const nd = nodes[k];
+    if ((nd.t === 'em' || nd.t === 'strong') && nd.ch === ch) {
+      const innerLen = nd.t === 'strong' ? 2 : 1;
+      if (innerLen > useLen && nd._openerNode !== candNode && nd._openerCanClose === false) {
+        const nx = nodes[k + 1];
+        if (nx && nx.t === 'text' && WORD_START.test(nx.s)) return true;
+      }
+    }
+  }
+  return false;
+}
 // true when the node list holds (at any depth) a code span whose content
 // contains a backtick — a `` `` a ` b `` `` span. A '_' pair spanning
 // such a code does not form inside a link label (doc-16/20 failed labels,
@@ -946,6 +976,10 @@ function processEmphasis(nodes, inLabel) {
       // link label (doc-16/20/23); in plain text it forms (doc-14/24).
       // Any earlier opener would span the same code, so stop searching.
       if (ch === '_' && (inLabel || closer._inLabel || cand._inLabel) && spanHasBacktickCode(nodes.slice(q + 1, ci))) break;
+      // marked emStrong: a both-flanking inner closer of greater length
+      // blocks this opener; keep searching for an outer opener (E-g/doc-11:
+      // the outer ** still matches the final closer with use=2).
+      if (ch === '*' && blockedByInner(nodes, q, ci, useHere, ch, cand)) continue;
       oi = q; break;
     }
     if (oi === -1) {
@@ -970,7 +1004,7 @@ function processEmphasis(nodes, inLabel) {
     const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
     const kind = ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
     const children = nodes.slice(oi + 1, ci);
-    const wrapper = { t: kind, children, ch };
+    const wrapper = { t: kind, children, ch, _openerNode: opener, _openerCanClose: opener.canClose };
     nodes.splice(oi, ci - oi + 1, wrapper);
     // adjust delimiter lengths; re-insert leftovers next to the wrapper
     let insertPos = oi + 1;
