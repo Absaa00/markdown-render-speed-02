@@ -551,9 +551,13 @@ function parseInline(src, refs, opts) {
       let j = i;
       while (j < n && src[j] === '`') j++;
       const run = j - i;
-      // find matching run
+      // find matching run; stop at a ']' followed by '(' or '[' while a
+      // bracket is active — that ']' closes link text, so the backtick run
+      // must not swallow it (the run then stays literal)
       let k = j, found = -1;
       while (k < n) {
+        if (src[k] === ']' && (src[k + 1] === '(' || src[k + 1] === '[') &&
+            k > j && src[k - 1] === '`' && brackets.some(b => b.active)) break;
         if (src[k] === '`') {
           let m = k;
           while (m < n && src[m] === '`') m++;
