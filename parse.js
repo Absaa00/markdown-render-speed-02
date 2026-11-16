@@ -1352,9 +1352,13 @@ export function parseBlocks(markdown) {
         // marked: an open fenced code block inside the item swallows
         // following lines as content even when they are not indented
         // enough to continue the item (e.g. doc-02 lines 39-42); the
-        // fence only ends at its closing fence line (section 3)
+        // fence only ends at its closing fence line (section 3).
+        // But only once the fence already holds content: an empty
+        // fence (doc-13 line 199, right after the ````sh opener)
+        // does NOT swallow — the under-indented line ends the item
+        // and the fence closes empty.
         const leaf0 = last.children[last.children.length - 1];
-        if (leaf0 && leaf0.open && leaf0.t === 'code_block' && leaf0.fenced) {
+        if (leaf0 && leaf0.open && leaf0.t === 'code_block' && leaf0.fenced && leaf0.literal !== '') {
           cur = last; container = last; continue;
         }
         matched = false; break;
