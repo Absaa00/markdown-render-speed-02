@@ -1317,9 +1317,14 @@ export function parseBlocks(markdown) {
       advSpaces(L, 3);
       const interrupts = interruptsParagraph(L, tip);
       if (!interrupts) {
-        // a partially-consumed tab keeps its remaining spaces verbatim
+        // A lazy continuation line keeps its leading spaces verbatim
+        // when the container walk consumed a marker before failing
+        // (e.g. `>   Inline` keeps 2 spaces, doc-26; `>  ![..]`
+        // keeps 1, doc-06; `>    Naïve` keeps 3, doc-22), but when
+        // no container matched at all (walk stopped at column 0) the
+        // leading spaces are stripped entirely (cm-238/291/312).
         let text;
-        if (saveL.partial > 0) text = rest(saveL);
+        if (saveL.col > 0 || saveL.partial > 0) text = rest(saveL);
         else { advSpaces(L, 1000); text = rest(L); }
         if (/^(=+|-+)[ \t]*$/.test(text)) text = '    ' + text;
         tip.lines.push(text);
