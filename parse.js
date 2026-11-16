@@ -1518,7 +1518,11 @@ export function parseBlocks(markdown) {
           }
           if (li >= leaf.lines.length) {
             finalize(leaf); tip = container; leaf = null;
-            // fall through to new-block detection for this line
+            // fall through to new-block detection for this line:
+            // restore the post-container position so section 4 sees
+            // the leading spaces (a fence interrupting a paragraph
+            // must keep its indent: doc-13 line 201 ```` fence)
+            L.i = saveP.i; L.col = saveP.col; L.partial = saveP.partial;
           } else {
             leaf.lines = leaf.lines.slice(li);
             const h = { t: 'heading', level: st, inline: leaf.lines.join('\n').replace(/^[ \t]+/, '').replace(/[ \t]+$/, '') };
@@ -1538,7 +1542,12 @@ export function parseBlocks(markdown) {
         const interrupts = interruptsParagraph(L, leaf);
         if (interrupts) {
           finalize(leaf); tip = container; leaf = null;
-          // fall through to new-block detection (L still positioned)
+          // fall through to new-block detection (restore the
+          // post-container position so section 4 sees the leading
+          // spaces: a fence interrupting a paragraph keeps its
+          // indent — doc-13 line 201 ```` fence content lost its
+          // 2-space strip because advSpaces above had eaten them)
+          L.i = saveP.i; L.col = saveP.col; L.partial = saveP.partial;
         } else {
           // continuation line: paragraph text keeps leading spaces verbatim
           L.i = saveP.i; L.col = saveP.col; L.partial = saveP.partial;
