@@ -1263,6 +1263,11 @@ export function parseBlocks(markdown) {
     // ---- 1. walk open containers ----
     let container = root;
     let matched = true;
+    let lineHadBq = false;
+    // true when a container consumed columns AFTER the last blockquote
+    // marker on this line (e.g. a list item inside the blockquote whose
+    // content offset eats the spaces before a tab: doc-02/15)
+    let afterBq = false;
     let cur = root;
     while (cur.children.length > 0) {
       const last = cur.children[cur.children.length - 1];
@@ -1272,6 +1277,8 @@ export function parseBlocks(markdown) {
         const save = { i: L.i, col: L.col, partial: L.partial };
         advSpaces(L, 3);
         if (peek(L) === '>') {
+          lineHadBq = true;
+          afterBq = false;
           adv(L, 1);
           const c = peek(L);
           if (c === ' ' || c === '\t') adv(L, 1);
@@ -1284,6 +1291,7 @@ export function parseBlocks(markdown) {
         // contentOffset is relative to the column after the item's ancestor
         // containers on this line, not an absolute document column
         if (indentCols(L) >= last.contentOffset) {
+          if (lineHadBq) afterBq = true;
           adv(L, last.contentOffset);
           cur = last; container = last; continue;
         }
@@ -1324,7 +1332,7 @@ export function parseBlocks(markdown) {
         // no container matched at all (walk stopped at column 0) the
         // leading spaces are stripped entirely (cm-238/291/312).
         let text;
-        if (saveL.col > 0 || saveL.partial > 0) text = rest(saveL);
+        if (saveL.col > 0 || saveL.partial > 0) text = restExpanded(saveL);
         else { advSpaces(L, 1000); text = rest(L); }
         if (/^(=+|-+)[ \t]*$/.test(text)) text = '    ' + text;
         tip.lines.push(text);
@@ -1406,7 +1414,16 @@ export function parseBlocks(markdown) {
           }
           L.i = save.i; L.col = save.col; L.partial = save.partial;
           advWsCols(L, leaf.fenceIndent);
-          leaf.literal += (L.col > 0 ? restExpanded(L) : rest(L)) + (lastLineHasNL ? '\n' : '');
+          let content = (L.col > 0 ? restExpanded(L) : rest(L));
+          if (lineHadBq && !afterBq && leaf.fenceIndent === 0 && (L.partial > 0 || peek(L) === '\t')) {
+            // a tab directly after blockquote markers in fenced code
+            // renders as 2 spaces (doc-05/08/09/14/19/30/40; the rust
+            // case doc-22 L1250 is excluded: its fenceIndent strip
+            // already consumed spaces before the tab)
+            const after = L.s.slice(L.i + 1);
+            if (after !== '' && after[0] !== ' ' && after[0] !== '\t') content = '  ' + after;
+          }
+          leaf.literal += content + (lastLineHasNL ? '\n' : '');
           ln++; continue;
         } else {
           // indented code ends when a line is not blank and indented < 4
@@ -1527,7 +1544,15 @@ export function parseBlocks(markdown) {
       if (cur2 === '`' || cur2 === '~') {
         const fence = matchFence(L);
         if (fence) {
-          const node = addChild(container, { t: 'code_block', fenced: true, fenceChar: fence.char, fenceLen: fence.len, fenceIndent, info: fence.info, literal: '' });
+          // tilde fence inside a blockquote: marked keeps the content
+          // indent (doc-22 typescript / doc-29 objective-c keep 3/2
+          // spaces); backtick fences keep the computed indent
+          let effFenceIndent = fenceIndent;
+          if (fence.char === '~') {
+            let c2 = container;
+            while (c2) { if (c2.t === 'blockquote') { effFenceIndent = 0; break; } c2 = c2.parent; }
+          }
+          const node = addChild(container, { t: 'code_block', fenced: true, fenceChar: fence.char, fenceLen: fence.len, fenceIndent: effFenceIndent, info: fence.info, literal: '' });
           tip = node;
           ln++; break;
         }
