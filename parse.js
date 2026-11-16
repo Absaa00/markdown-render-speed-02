@@ -413,6 +413,14 @@ function parseInline(src, refs, opts) {
   const n = src.length;
   let i = 0;
   let textStart = 0;
+  // task list checkbox at the very start of a list-item paragraph: check
+  // the raw source before scanning ('[' would otherwise be split into its
+  // own text node and the post-parse check never matches)
+  let taskbox = null;
+  if (opts && opts.taskList) {
+    const m = /^\[([ xX])\] /.exec(src);
+    if (m) { taskbox = { t: 'taskbox', checked: m[1] !== ' ' }; i = 3; textStart = 3; }
+  }
   const flushText = (upto) => {
     if (upto > textStart) nodes.push({ t: 'text', s: src.slice(textStart, upto) });
   };
@@ -640,18 +648,7 @@ function parseInline(src, refs, opts) {
   }
   flushText(n);
 
-  // task list checkbox at the very start of a list-item paragraph
-  if (opts && opts.taskList && nodes.length > 0 && nodes[0].t === 'text') {
-    const s0 = nodes[0].s;
-    const m = /^\[([ xX])\] /.exec(s0);
-    if (m) {
-      const checked = m[1] !== ' ';
-      nodes[0].s = s0.slice(4);
-      if (nodes[0].s === '') nodes.shift();
-      nodes.unshift({ t: 'taskbox', checked });
-    }
-  }
-
+  if (taskbox) nodes.unshift(taskbox);
   processEmphasis(nodes);
   return nodes;
 }
