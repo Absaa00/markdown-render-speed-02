@@ -108,7 +108,7 @@ function escapeAttr(s) {
 // Valid %XX escapes are kept verbatim (not double-encoded to %25).
 function cleanUrl(href) {
   // encodeURI, then escape for the attribute (entities kept verbatim).
-  return escapeAttr(href.split(/(%[0-9A-Fa-f]{2})/g).map((seg, k) => (k % 2 === 1 ? seg : encodeURI(seg))).join(''));
+  return escapeAttr(href.split(/(%[0-9A-Fa-f]{2})/g).map((seg, k) => (k % 2 === 1 ? seg : encodeURI(seg).replace(/%25/g, '%'))).join(''));
 }
 
 // ---------------- inline parsing ----------------
@@ -329,7 +329,7 @@ function tryAutolink(s, i) {
     while (e < n && s[e] !== '>' && s[e] !== ' ' && s[e] !== '\t' && s[e] !== '\n' && s[e] !== '<') e++;
     if (e < n && s[e] === '>') {
       const dest = s.slice(j, e);
-      return { node: { t: 'link', href: dest, title: null, children: [{ t: 'text', s: dest }] }, next: e + 1 };
+      return { node: { t: 'link', href: dest, title: null, auto: true, children: [{ t: 'text', s: dest }] }, next: e + 1 };
     }
     return null;
   }
@@ -339,7 +339,7 @@ function tryAutolink(s, i) {
   if (e < n && s[e] === '>') {
     const cand = s.slice(j, e);
     if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(cand)) {
-      return { node: { t: 'link', href: 'mailto:' + cand, title: null, children: [{ t: 'text', s: cand }] }, next: e + 1 };
+      return { node: { t: 'link', href: 'mailto:' + cand, title: null, auto: true, children: [{ t: 'text', s: cand }] }, next: e + 1 };
     }
   }
   return null;
@@ -352,7 +352,7 @@ function tryExtAutolink(s, i) {
   let isWww = false, isHttp = false, isEmail = false;
   let start = i;
   if (s.startsWith('www.', i)) { isWww = true; }
-  else if (s.startsWith('https://', i) || s.startsWith('http://', i)) { isHttp = true; }
+  else if (/^https?:\/\//i.test(s.slice(i, i + 8))) { isHttp = true; }
   else {
     // scheme:email[/segment] — e.g. mailto:foo@bar.baz, xmpp:foo@bar.baz/txt
     const sm = /^[A-Za-z][A-Za-z0-9+.-]{1,31}:/.exec(s.slice(i, i + 34));
@@ -388,7 +388,7 @@ function tryExtAutolink(s, i) {
             const emailPart = cand.slice(sm[0].length).split('/')[0];
             if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(emailPart)
                 && /[A-Za-z]/.test(emailPart.slice(emailPart.lastIndexOf('.') + 1))) {
-              return { node: { t: 'link', href: cand, title: null, children: [{ t: 'text', s: cand }] }, next: i + cand.length };
+              return { node: { t: 'link', href: cand, title: null, auto: true, children: [{ t: 'text', s: cand }] }, next: i + cand.length };
             }
           }
         }
@@ -405,7 +405,7 @@ function tryExtAutolink(s, i) {
       while (cand.endsWith('.')) { cand = cand.slice(0, -1); d--; }
       if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(cand)
           && /[A-Za-z]/.test(cand.slice(cand.lastIndexOf('.') + 1))) {
-        return { node: { t: 'link', href: 'mailto:' + cand, title: null, children: [{ t: 'text', s: cand }] }, next: d };
+        return { node: { t: 'link', href: 'mailto:' + cand, title: null, auto: true, children: [{ t: 'text', s: cand }] }, next: d };
       }
     }
     return null;
@@ -419,7 +419,7 @@ function tryExtAutolink(s, i) {
     const m = /^www\.[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/.exec(url);
     if (!m) return null;
   } else {
-    const m = /^https?:\/\/[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*/.exec(url);
+    const m = /^https?:\/\/[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*/i.exec(url);
     if (!m) return null;
   }
   // trim trailing punctuation per GFM
@@ -449,7 +449,7 @@ function tryExtAutolink(s, i) {
   // must still contain a valid domain after trimming
   if (isWww && !/^www\.[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/.test(url)) return null;
   const href = isWww ? 'http://' + url : url;
-  return { node: { t: 'link', href, title: null, children: [{ t: 'text', s: url }] }, next: i + url.length };
+  return { node: { t: 'link', href, title: null, auto: true, children: [{ t: 'text', s: url }] }, next: i + url.length };
 }
 
 // ---- main inline scanner ----
@@ -640,7 +640,7 @@ function parseInline(src, refs, opts) {
         const children = nodes.slice(br.idx + 1, closeIdx);
         // a link cannot contain another link (images may contain links)
         if (!br.image) {
-          for (const ch of children) if (ch.t === 'link') { formed = false; break; }
+          for (const ch of children) if (ch.t === 'link' && !ch.auto) { formed = false; break; }
         }
       }
       if (formed) {
@@ -849,6 +849,18 @@ function advSpaces(L, maxN) {
   return n;
 }
 
+// Advance up to maxCols columns of leading whitespace only (a tab counts
+// by columns, so a partially-consumed tab leaves its remainder as spaces
+// via rest()). Unlike adv(), never eats non-whitespace characters.
+function advWsCols(L, maxCols) {
+  let n = 0;
+  while (n < maxCols) {
+    const c = peek(L);
+    if (c === ' ' || c === '\t') { adv(L, 1); n++; }
+    else break;
+  }
+  return n;
+}
 const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option p param section source summary table tbody td tfoot th thead title tr track ul').split(' '));
 
 function matchHtmlBlockStart(L) {
@@ -974,6 +986,25 @@ function listInterrupts(L) {
   if (afterMarker(L, lm).trim() === '') return false;
   if (lm.type === 'ordered' && lm.start !== 1) return false;
   return true;
+}
+
+// Does a line interrupt the given open paragraph? lineInterrupts plus
+// rule H: a non-empty list marker interrupts when the paragraph sits
+// inside a list item, whatever its number or delimiter (a change of
+// delimiter starts a new list); an empty marker interrupts only for the
+// same list (an empty item of another list cannot).
+function interruptsParagraph(L, para) {
+  if (lineInterrupts(L)) return true;
+  const lm = matchListMarker(L);
+  if (!lm) return false;
+  let p = para ? para.parent : null;
+  while (p && p.t !== 'item' && p.t !== 'document') p = p.parent;
+  if (!p || p.t !== 'item') return false;
+  if (lm.spacesAfter > 0 && afterMarker(L, lm).trim() !== '') return true;
+  const al = p.parent;
+  if (al && al.t === 'list' && al.listType === lm.type &&
+      (lm.type === 'bullet' ? al.bulletChar === lm.char : al.delim === lm.delim)) return true;
+  return false;
 }
 
 // Try to parse a link reference definition starting at `first` (rest of the
@@ -1195,34 +1226,14 @@ export function parseBlocks(markdown) {
     // interrupt a paragraph. Leading whitespace is stripped; a setext-like
     // line gets 4 spaces prefixed (marked's re-lex guard, visible in output).
     if (!matched && tip.t === 'paragraph' && !blank) {
-      const saveL = { i: L.i, col: L.col, partial: L.partial };
+      const saveL = { s: L.s, i: L.i, col: L.col, partial: L.partial };
       advSpaces(L, 3);
-      let interrupts = lineInterrupts(L);
+      const interrupts = interruptsParagraph(L, tip);
       if (!interrupts) {
-        // a non-empty list marker interrupts when the paragraph sits inside
-        // a list item, whatever its number or delimiter (a change of
-        // delimiter starts a new list); an empty marker interrupts only
-        // for the same list (an empty item of another list cannot)
-        const lm = matchListMarker(L);
-        if (lm) {
-          let p = tip.parent;
-          while (p && p.t !== 'item' && p.t !== 'document') p = p.parent;
-          if (p && p.t === 'item') {
-            if (lm.spacesAfter > 0 && afterMarker(L, lm).trim() !== '') {
-              interrupts = true;
-            } else {
-              const al = p.parent;
-              if (al && al.t === 'list' && al.listType === lm.type &&
-                  (lm.type === 'bullet' ? al.bulletChar === lm.char : al.delim === lm.delim)) {
-                interrupts = true;
-              }
-            }
-          }
-        }
-      }
-      if (!interrupts) {
-        advSpaces(L, 1000);
-        let text = rest(L);
+        // a partially-consumed tab keeps its remaining spaces verbatim
+        let text;
+        if (saveL.partial > 0) text = rest(saveL);
+        else { advSpaces(L, 1000); text = rest(L); }
         if (/^(=+|-+)[ \t]*$/.test(text)) text = '    ' + text;
         tip.lines.push(text);
         ln++; continue;
@@ -1256,7 +1267,7 @@ export function parseBlocks(markdown) {
       }
       else if (leaf && leaf.t === 'code_block' && leaf.fenced) {
         // blank line inside fenced code is content (spaces kept)
-        advSpaces(L, leaf.fenceIndent);
+        advWsCols(L, leaf.fenceIndent);
         leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
         structural = false;
       }
@@ -1300,7 +1311,7 @@ export function parseBlocks(markdown) {
             ln++; continue;
           }
           L.i = save.i; L.col = save.col; L.partial = save.partial;
-          advSpaces(L, leaf.fenceIndent);
+          advWsCols(L, leaf.fenceIndent);
           leaf.literal += rest(L) + (lastLineHasNL ? '\n' : '');
           ln++; continue;
         } else {
@@ -1355,7 +1366,7 @@ export function parseBlocks(markdown) {
         // interrupting blocks: ATX, fence, HTML 1-6, thematic break,
         // blockquote, list (bullet, or ordered starting at 1)
         if (leaf) {
-        const interrupts = lineInterrupts(L);
+        const interrupts = interruptsParagraph(L, leaf);
         if (interrupts) {
           finalize(leaf); tip = container; leaf = null;
           // fall through to new-block detection (L still positioned)
