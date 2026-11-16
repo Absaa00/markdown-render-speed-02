@@ -982,6 +982,22 @@ function advSpaces(L, maxN) {
 // Advance up to maxCols columns of leading whitespace only (a tab counts
 // by columns, so a partially-consumed tab leaves its remainder as spaces
 // via rest()). Unlike adv(), never eats non-whitespace characters.
+// Strip up to n columns of fence indent: SPACE characters only, never
+// cutting into a tab; a tab inside the indent region is dropped whole
+// (doc-17: a 3-col strip swallows a tab at col 0 entirely). Returns the
+// column before the strip, so callers can tell whether the line arrived
+// via container stripping (tabs then expand) or at column 0 (tabs stay
+// raw: doc-38; doc-13 L382 keeps the spaces plus the raw tab).
+function stripFenceIndent(L, n) {
+  const col0 = L.col;
+  let stripped = 0;
+  while (stripped < n) {
+    if (peek(L) !== ' ') break;
+    adv(L, 1); stripped++;
+  }
+  if (peek(L) === '\t' && stripped < n) { L.col += 4 - (L.col % 4); L.i++; }
+  return col0;
+}
 function advWsCols(L, maxCols) {
   let n = 0;
   while (n < maxCols) {
@@ -1427,7 +1443,7 @@ export function parseBlocks(markdown) {
       }
       else if (leaf && leaf.t === 'code_block' && leaf.fenced) {
         // blank line inside fenced code is content (spaces kept)
-        advWsCols(L, leaf.fenceIndent);
+        stripFenceIndent(L, leaf.fenceIndent);
         leaf.literal += (L.col > 0 ? restExpanded(L) : rest(L)) + (lastLineHasNL ? '\n' : '');
         structural = false;
       }
@@ -1471,22 +1487,10 @@ export function parseBlocks(markdown) {
             ln++; continue;
           }
           L.i = save.i; L.col = save.col; L.partial = save.partial;
-          // Fence-indent strip removes SPACE characters only. A tab
-          // inside the indent region is dropped whole (doc-17: a
-          // 3-col strip swallows a tab at col 0 entirely); a tab past
-          // the indent stays raw (doc-38; doc-13 L382 keeps the spaces
-          // plus the raw tab). Tabs reached via container stripping
-          // still expand (doc-13 L182), so the expand/raw choice keys
-          // on the column before the strip, not after it.
-          const colBeforeStrip = L.col;
-          let stripped = 0;
-          while (stripped < leaf.fenceIndent) {
-            if (peek(L) !== ' ') break;
-            adv(L, 1); stripped++;
-          }
-          if (peek(L) === '\t' && stripped < leaf.fenceIndent) {
-            L.col += 4 - (L.col % 4); L.i++;
-          }
+          // Fence-indent strip (spaces only; a tab inside the indent
+          // region is dropped whole). Tabs reached via container
+          // stripping still expand; otherwise the rest stays raw.
+          const colBeforeStrip = stripFenceIndent(L, leaf.fenceIndent);
           let content;
           if (colBeforeStrip > 0) content = restExpanded(L);
           else content = rest(L);
@@ -1568,7 +1572,17 @@ export function parseBlocks(markdown) {
         } else {
           // continuation line: paragraph text keeps leading spaces verbatim
           L.i = saveP.i; L.col = saveP.col; L.partial = saveP.partial;
-          leaf.lines.push(rest(L));
+          let line = rest(L);
+          if (lineHadBq && peek(L) === '\t') {
+            // a tab right after blockquote markers expands from the
+            // column counted from the last '>' (spaces before it don't
+            // count): '> \t' -> 2 spaces (doc-17; doc-05 '> > \t'
+            // likewise). Tabs without a blockquote stay raw.
+            const gt = rawLine.lastIndexOf('>', saveP.i - 1);
+            const relCol = gt < 0 ? saveP.col : saveP.col - gt;
+            line = ' '.repeat(4 - (relCol % 4)) + L.s.slice(L.i + 1);
+          }
+          leaf.lines.push(line);
           ln++; continue;
         }
         }
