@@ -245,6 +245,9 @@ function matchTag(s, i) {
   const n = s.length;
   if (s[i + 1] === '!') {
     if (s.startsWith('<!--', i)) {
+      // abrupt closing of an empty comment: <!--> and <!---> are complete
+      if (s.startsWith('<!-->', i)) return i + 5;
+      if (s.startsWith('<!--->', i)) return i + 6;
       const e = s.indexOf('-->', i + 4);
       return e === -1 ? -1 : e + 3;
     }
@@ -274,14 +277,21 @@ function matchTag(s, i) {
     while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
     return j < n && s[j] === '>' ? j + 1 : -1;
   }
+  // after the tag name only whitespace, '>' or '/>' may follow
+  if (j < n && s[j] !== '>' && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n' &&
+      !(s[j] === '/' && s[j + 1] === '>')) return -1;
   // attributes
   for (;;) {
-    while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
+    let ws = 0;
+    while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) { j++; ws++; }
     if (j >= n) return -1;
     if (s[j] === '>') return j + 1;
     if (s[j] === '/' && s[j + 1] === '>') return j + 2;
-    // attribute name
-    if (!/[A-Za-z_:]/.test(s[j]) && !(s[j] >= '0' && s[j] <= '9') && s[j] !== '-' && s[j] !== '.') return -1;
+    // an attribute must be separated from the tag name / previous value
+    // by whitespace
+    if (ws === 0) return -1;
+    // attribute name: first char [A-Za-z_:] only
+    if (!/[A-Za-z_:]/.test(s[j])) return -1;
     while (j < n && /[A-Za-z0-9_.:-]/.test(s[j])) j++;
     while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
     if (j < n && s[j] === '=') {
