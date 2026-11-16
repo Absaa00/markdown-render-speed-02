@@ -271,6 +271,41 @@ function backtickSpanBreaksLabel(label) {
   return lastSpanEnd !== n;
 }
 
+// Whether every backtick run in a link label is consumable the way
+// marked's label regex consumes it: a unit `+ ... `+ (any lengths, the
+// content is [^`]*? so the NEAREST later run closes it), or 2+ backticks
+// immediately before the closing ']' (``+(?=\])). A lone run that cannot
+// start a unit (no later run) makes the label unconsumable, so marked's
+// link regex fails and a code span may swallow the ']' (cm-525, p10).
+// Backslash-escaped backticks are literal text, not runs.
+function labelBackticksPaired(label) {
+  const n = label.length;
+  let i = 0;
+  while (i < n) {
+    const c = label[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') {
+      let j = i;
+      while (j < n && label[j] === '`') j++;
+      const runLen = j - i;
+      // nearest later backtick run closes the unit
+      let k = j;
+      while (k < n && label[k] !== '`') k++;
+      if (k < n) {
+        let m = k;
+        while (m < n && label[m] === '`') m++;
+        i = m;
+        continue;
+      }
+      // no later run: only ``+ right before ']' (end of label) counts
+      if (runLen >= 2 && j === n) return true;
+      return false;
+    }
+    i++;
+  }
+  return true;
+}
+
 // An autolink inside link text renders as plain text when the enclosing
 // link forms (no nested <a>): replace auto link nodes with their children.
 function flattenAutoLinks(nodes) {
@@ -547,6 +582,12 @@ function tryExtAutolink(s, i, hasUOpener, inLiveBracket) {
 }
 
 // ---- main inline scanner ----
+// marked's inLink state: an unclosed <a ...> tag (startATag /^<a /i) sets
+// it and only a </a> clears it; it is NOT reset between inline parses, so
+// it leaks forward in document order and suppresses extended autolinks
+// (www/http/email via url()) in all later paragraphs until cleared
+// (doc-03/06/33). It is reset once per parse() call.
+let inLink = false;
 function parseInline(src, refs, opts) {
   const nodes = [];          // node list
   const brackets = [];       // {idx, image, active}
@@ -639,6 +680,19 @@ function parseInline(src, refs, opts) {
         if (src[k] === ']' && (src[k + 1] === '(' || src[k + 1] === '[') &&
             k > j && src[k - 1] === '`' && brackets.some(b => b.active)) { guardedClose.add(k); break; }
         if (src[k] === ']' && guardedClose.has(k)) break;
+        // a ']' that would close an active bracket's link: if the label's
+        // backtick runs form complete units (marked's label regex), the
+        // link forms and this code span must not swallow the ']' (doc-16:
+        // [values ``guide` in](#should)). If the label has a lone run,
+        // marked's link regex fails and the span may cross it (cm-525).
+        if (src[k] === ']' && (src[k + 1] === '(' || src[k + 1] === '[') &&
+            brackets.some(b => b.active)) {
+          let br = null;
+          for (let q = brackets.length - 1; q >= 0; q--) {
+            if (brackets[q].active) { br = brackets[q]; break; }
+          }
+          if (br && labelBackticksPaired(src.slice(br.pos + 1, k))) { guardedClose.add(k); break; }
+        }
         if (src[k] === '`') {
           let m = k;
           while (m < n && src[m] === '`') m++;
@@ -791,7 +845,14 @@ function parseInline(src, refs, opts) {
       const al = tryAutolink(src, i);
       if (al) { flushText(i); nodes.push(al.node); i = al.next; textStart = i; continue; }
       const tagEnd = matchTag(src, i);
-      if (tagEnd !== -1) { flushText(i); nodes.push({ t: 'html', s: src.slice(i, tagEnd) }); i = tagEnd; textStart = i; continue; }
+      if (tagEnd !== -1) {
+        const tagText = src.slice(i, tagEnd);
+        // marked tag(): <a[ ] sets inLink, </a> clears it (startATag
+        // requires a space after <a, so <a> alone does not set it)
+        if (/^<a /i.test(tagText)) inLink = true;
+        else if (/^<\/a>/i.test(tagText)) inLink = false;
+        flushText(i); nodes.push({ t: 'html', s: tagText }); i = tagEnd; textStart = i; continue;
+      }
       i++; continue;
     }
 
@@ -808,10 +869,11 @@ function parseInline(src, refs, opts) {
     }
 
     // --- GFM extended autolink (www. / http(s) / email) ---
+    // marked tries url() only when !state.inLink
     if (c === 'w' || c === 'h' || isAlnum(c)) {
       const prev = i > 0 ? src[i - 1] : '';
       const prevOk = prev === '' || isUnicodeWs(prev) || isPunct(prev);
-      if (prevOk) {
+      if (prevOk && !inLink) {
         // a bracket is "live" for URL purposes when its label so far holds
         // no (non-auto) link — only then can a ']' after the URL close it
         const inLiveBracket = brackets.some(b => b.active && !nodes.slice(b.idx + 1).some(nd => nd.t === 'link' && !nd.auto));
@@ -1482,12 +1544,16 @@ export function parseBlocks(markdown) {
 
     // blank line: ends paragraph, marks blanks for lists
     if (blank) {
-      // an HTML block finalized on the previous line loses its trailing
-      // newline when a truly empty line follows it; a blank line of
-      // only spaces or tabs does not strip it (any type: cm-183 type 2,
-      // doc-02/05 type 1 drop it, doc-15/19 keep it after ws-only lines)
-      if (pendingHtml && rawLine === '' && pendingHtml.literal.endsWith('\n')) {
-        pendingHtml.literal = pendingHtml.literal.slice(0, -1);
+      // record what kind of blank line follows a finalized HTML block;
+      // the trailing-newline drop is decided in the post-pass below (it
+      // depends on the block's container: a top-level block drops only
+      // after a truly empty line — a ws-only blank does not strip it
+      // (cm-183 type 2, doc-02/05 type 1 drop it, doc-15/19 keep it
+      // after ws-only lines); see the post-pass for item/blockquote)
+      if (pendingHtml) {
+        if (rawLine === '') pendingHtml._blankAfter = 'empty';
+        else if (rawLine.trim() === '') pendingHtml._blankAfter = 'ws';
+        else pendingHtml._blankAfter = 'marker';
       }
       pendingHtml = null;
       // a blank line is structural unless it is content of fenced/indented
@@ -1792,8 +1858,10 @@ export function parseBlocks(markdown) {
   // finalize remaining open blocks
   while (tip !== root) { const p = tip.parent; finalize(tip); tip = p; }
 
-  // HTML blocks type 6/7 drop their trailing newline unless they are the
-  // last block of the document (types 1-5 always keep it)
+  // HTML block trailing newline (marked: the block's text ends before the
+  // container's final newline, except a loose list item whose blank line
+  // keeps it, and a blockquote ending on a marker-only blank line).
+  // Type 6 drops unless it is the last block of the document.
   {
     const flat = [];
     (function walk(node) {
@@ -1801,10 +1869,35 @@ export function parseBlocks(markdown) {
     })(root);
     for (let k = 0; k < flat.length; k++) {
       const nd = flat[k];
-      if (nd.t === 'html_block' && nd.blockType === 6 && k < flat.length - 1 &&
-          nd.literal.endsWith('\n')) {
-        nd.literal = nd.literal.slice(0, -1);
+      if (nd.t !== 'html_block' || !nd.literal.endsWith('\n')) continue;
+      const parent = nd.parent;
+      const sibs = parent ? parent.children : [];
+      const isLastChild = sibs.length > 0 && sibs[sibs.length - 1] === nd;
+      let drop = false;
+      if (nd.blockType === 6 && k < flat.length - 1) drop = true;
+      else if (parent && parent.t === 'document') drop = nd._blankAfter === 'empty';
+      else if (parent && parent.t === 'blockquote') {
+        // with no blank line, the newline drops only when the block is
+        // the blockquote's last (bq1/bq2 keep it when a paragraph follows);
+        // with a blank line it drops except after a marker-only blank
+        // line as the blockquote's last block (L6 keeps it, L2/n10 drop)
+        drop = nd._blankAfter
+          ? !(nd._blankAfter === 'marker' && isLastChild)
+          : isLastChild;
       }
+      else if (parent && parent.t === 'item') {
+        const items = parent.parent ? parent.parent.children : [];
+        const hasNextItem = items.indexOf(parent) < items.length - 1;
+        // a blank line after the block drops the newline, unless the block
+        // is the item's last and a sibling item follows (loose list keeps
+        // it); with no blank line, the newline drops only when the block
+        // is the item's last (the item text has no trailing newline), and
+        // is kept when another block follows in the same item (doc-04/14/36)
+        drop = nd._blankAfter
+          ? !(isLastChild && hasNextItem)
+          : isLastChild;
+      }
+      if (drop) nd.literal = nd.literal.slice(0, -1);
     }
   }
 
@@ -1899,12 +1992,15 @@ function renderBlock(node, refs, out) {
       out.push('<hr>\n');
       break;
     case 'code_block': {
+      // marked's code renderer: text with one trailing newline stripped,
+      // then exactly one appended (empty stays empty)
+      const lit = node.literal ? node.literal.replace(/\n$/, '') + '\n' : '';
       if (node.fenced) {
         const lang = (node.info.split(/[\s]/)[0] || '').replace(/\\([!"#$%&'()*+,\-.\/:;<=>?@\[\\\]^_`{|}~])/g, '$1');
         out.push('<pre><code' + (lang ? ' class="language-' + escapeAttr(lang) + '"' : '') + '>' +
-          escapeHtml(node.literal) + '</code></pre>\n');
+          escapeHtml(lit) + '</code></pre>\n');
       } else {
-        out.push('<pre><code>' + escapeHtml(node.literal) + '</code></pre>\n');
+        out.push('<pre><code>' + escapeHtml(lit) + '</code></pre>\n');
       }
       break;
     }
@@ -1970,6 +2066,7 @@ function renderBlock(node, refs, out) {
 }
 
 export function parse(markdown) {
+  inLink = false;
   const { root, refs } = parseBlocks(markdown);
   const out = [];
   renderBlock(root, refs, out);
