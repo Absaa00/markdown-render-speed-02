@@ -719,7 +719,7 @@ function parseInline(src, refs, opts) {
       const len = j - i;
       const [co, cc] = canOpenClose(i, len, c);
       flushText(i);
-      nodes.push({ t: 'delim', s: src.slice(i, j), ch: c, len, canOpen: co, canClose: cc, active: true });
+      nodes.push({ t: 'delim', s: src.slice(i, j), ch: c, len, canOpen: co, canClose: cc, active: true, pos: i });
       i = j; textStart = i; continue;
     }
 
@@ -888,8 +888,44 @@ function parseInline(src, refs, opts) {
   flushText(n);
 
   if (taskbox) nodes.unshift(taskbox);
+  // Marked emStrong mask (verified against the marked oracle, probeO/P/Q):
+  // before emphasis resolution, marked masks link / code-span / html-tag
+  // regions of the raw inline source (blockSkip) — a delimiter inside such
+  // a region is invisible to the closer search, so it can never close.
+  // The mask is computed on the RAW source, ignoring link boundaries, so a
+  // stray backtick inside a link label can pair with a later backtick and
+  // swallow the text between them (doc-09/16/28/35: the emphasis between a
+  // link with unbalanced backticks in its label and a later code span stays
+  // literal). Only TOP-LEVEL delims get the paragraph-scope mask — label
+  // children were already resolved in their own scope (line 816) and must
+  // not see the paragraph mask (a link's own label still forms emphasis).
+  applyEmphasisMask(src, nodes);
   processEmphasis(nodes);
   return nodes;
+}
+
+// Combined blockSkip regex (single /g scan so a match consumes its text:
+// a code span never starts inside a matched link, and vice versa).
+// escape: \ + punct/symbol is masked as '++' in marked (probeP: \| \* \_ \~
+// all become ++, while \ + letter is not masked). The escape alternative
+// MUST be in this combined regex: an escaped backtick \` must not start a
+// code span in the mask scan (doc-02: a \` early in the paragraph paired
+// with a later `npm` and swallowed the whole paragraph, hiding __value__).
+const MASK_RE = /\\[\p{P}\p{S}]|(?<!`)(?<bt>`+)(?:[^`]|[^`][\s\S]*?[^`])\k<bt>(?!`)|\[(?:\\[\s\S]|[^\[\]`]|(?<lb>`+)[^`]+\k<lb>(?!`))*?\]\((?:\\[\s\S]|[^\\()]|\((?:\\[\s\S]|[^\\()])*\))*\)|<(?! )[^<>]*?>/gu;
+function applyEmphasisMask(src, nodes) {
+  MASK_RE.lastIndex = 0;
+  const ranges = [];
+  let m;
+  while ((m = MASK_RE.exec(src)) !== null) ranges.push([m.index, m.index + m[0].length]);
+  if (!ranges.length) return;
+  for (const nd of nodes) {
+    if (nd.t !== 'delim' || (nd.ch !== '*' && nd.ch !== '_') || !nd.canClose) continue;
+    const p = nd.pos;
+    for (let r = 0; r < ranges.length; r++) {
+      if (p >= ranges[r][0] && p < ranges[r][1]) { nd.canClose = false; break; }
+      if (ranges[r][0] > p) break;
+    }
+  }
 }
 
 // ---- emphasis / strikethrough resolution ----
