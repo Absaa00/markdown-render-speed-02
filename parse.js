@@ -1247,6 +1247,14 @@ export function parseBlocks(markdown) {
           adv(L, last.contentOffset);
           cur = last; container = last; continue;
         }
+        // marked: an open fenced code block inside the item swallows
+        // following lines as content even when they are not indented
+        // enough to continue the item (e.g. doc-02 lines 39-42); the
+        // fence only ends at its closing fence line (section 3)
+        const leaf0 = last.children[last.children.length - 1];
+        if (leaf0 && leaf0.open && leaf0.t === 'code_block' && leaf0.fenced) {
+          cur = last; container = last; continue;
+        }
         matched = false; break;
       } else break;
     }
