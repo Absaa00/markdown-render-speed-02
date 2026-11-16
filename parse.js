@@ -754,14 +754,48 @@ function processEmphasis(nodes) {
       // rule of 3: when both can open and close, the sum of lengths must not
       // be a multiple of 3, unless both lengths are multiples of 3
       if ((cand.canClose || closer.canOpen) && (cand.len + closer.len) % 3 === 0 && !(cand.len % 3 === 0 && closer.len % 3 === 0)) continue;
+      const useHere = (cand.len >= 2 && closer.len >= 2) ? 2 : 1;
+      if (useHere === 1 && (ch === '*' || ch === '_')) {
+        const freshPair = !closer._from && !cand._left;
+        if (freshPair) {
+          // E-B (marked): a fresh single closer must not steal one delim
+          // from a len-2 opener when a later len-2+ closer can complete
+          // the strong (doc-01); cm-430 (opener len 3) is unaffected.
+          if (cand.len === 2 && closer.len === 1) {
+            let later = false;
+            for (let m = ci + 1; m < nodes.length; m++) {
+              const nd = nodes[m];
+              if (nd.t === 'delim' && nd.ch === ch && nd.len >= 2 && nd.canClose && nd.active) { later = true; break; }
+            }
+            if (later) break;
+          }
+        }
+      }
       oi = q; break;
     }
-    if (oi === -1) continue;
+    if (oi === -1) {
+      // E-C (marked): a first-generation single leftover closer that could
+      // not match goes INSIDE the wrapper it came from when that wrapper
+      // holds a same-char em/strong child: **x *y*z*** renders
+      // <strong>x <em>y</em>z*</strong> (doc-30/doc-11), while a plain
+      // **foo*** keeps the star outside (cm-446).
+      if (closer._from && closer._gen === 1 && closer.len === 1) {
+        const w = closer._from;
+        if (w.t === 'strong' && nodes[ci - 1] === w && w.children && w.children.some(c => (c.t === 'em' || c.t === 'strong') && c.ch === ch)) {
+          nodes.splice(ci, 1);
+          w.children.push(closer);
+          delete closer._from;
+          ci--;
+          continue;
+        }
+      }
+      continue;
+    }
     const opener = nodes[oi];
     const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
     const kind = ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
     const children = nodes.slice(oi + 1, ci);
-    const wrapper = { t: kind, children };
+    const wrapper = { t: kind, children, ch };
     nodes.splice(oi, ci - oi + 1, wrapper);
     // adjust delimiter lengths; re-insert leftovers next to the wrapper
     let insertPos = oi + 1;
@@ -769,6 +803,7 @@ function processEmphasis(nodes) {
     closer.len -= use;
     if (opener.len > 0) {
       opener.s = opener.ch.repeat(opener.len);
+      opener._left = true;
       nodes.splice(oi, 0, opener);
       insertPos++;
     } else {
@@ -776,6 +811,8 @@ function processEmphasis(nodes) {
     }
     if (closer.len > 0) {
       closer.s = closer.ch.repeat(closer.len);
+      closer._from = wrapper;
+      closer._gen = (closer._gen || 0) + 1;
       nodes.splice(insertPos, 0, closer);
       ci = insertPos - 1; // re-examine the leftover closer (it may match an outer opener)
     } else {
