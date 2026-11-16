@@ -351,13 +351,55 @@ function tryExtAutolink(s, i) {
   if (s.startsWith('www.', i)) { isWww = true; }
   else if (s.startsWith('https://', i) || s.startsWith('http://', i)) { isHttp = true; }
   else {
+    // scheme:email[/segment] — e.g. mailto:foo@bar.baz, xmpp:foo@bar.baz/txt
+    const sm = /^[A-Za-z][A-Za-z0-9+.-]{1,31}:/.exec(s.slice(i, i + 34));
+    if (sm) {
+      let j = i + sm[0].length;
+      const ls = j;
+      while (j < n && /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(s[j])) j++;
+      if (j > ls && j < n && s[j] === '@') {
+        j++;
+        const ds = j;
+        while (j < n && /[A-Za-z0-9._-]/.test(s[j])) j++;
+        if (j > ds) {
+          let end = j;
+          // optional / + one segment (no '/' inside)
+          if (s[j] === '/') {
+            let k = j + 1;
+            while (k < n && s[k] !== '/' && !isSpace(s[k]) && s[k] !== '<' && s[k] !== '>') k++;
+            if (k > j + 1) end = k;
+          }
+          let cand = s.slice(i, end);
+          // trim trailing punctuation (never _ or -) + entity rule
+          while (cand.length > 0) {
+            const c = cand[cand.length - 1];
+            if ('.,/:?!*~\')'.includes(c)) { cand = cand.slice(0, -1); continue; }
+            if (c === ';') {
+              const amp = cand.lastIndexOf('&', cand.length - 2);
+              if (amp !== -1 && /^&[A-Za-z0-9]+$/.test(cand.slice(amp, cand.length - 1))) { cand = cand.slice(0, amp); continue; }
+              cand = cand.slice(0, -1); continue;
+            }
+            break;
+          }
+          if (cand.length > sm[0].length) {
+            const emailPart = cand.slice(sm[0].length).split('/')[0];
+            if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(emailPart)
+                && /[A-Za-z]/.test(emailPart.slice(emailPart.lastIndexOf('.') + 1))) {
+              return { node: { t: 'link', href: cand, title: null, children: [{ t: 'text', s: cand }] }, next: i + cand.length };
+            }
+          }
+        }
+      }
+    }
     // email: scan local@domain
     let j = i;
     while (j < n && /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(s[j])) j++;
     if (j > i && j < n && s[j] === '@') {
       let d = j + 1;
-      while (d < n && /[A-Za-z0-9.-]/.test(s[d])) d++;
-      const cand = s.slice(i, d);
+      while (d < n && /[A-Za-z0-9._-]/.test(s[d])) d++;
+      let cand = s.slice(i, d);
+      // trim trailing dots (a.b. links as a.b + '.')
+      while (cand.endsWith('.')) { cand = cand.slice(0, -1); d--; }
       if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(cand)
           && /[A-Za-z]/.test(cand.slice(cand.lastIndexOf('.') + 1))) {
         return { node: { t: 'link', href: 'mailto:' + cand, title: null, children: [{ t: 'text', s: cand }] }, next: d };
@@ -381,7 +423,7 @@ function tryExtAutolink(s, i) {
   let end = url.length;
   while (end > 0) {
     const c = url[end - 1];
-    if ('?!.,:;*_~'.includes(c)) { end--; continue; }
+    if ('?!.,:*_~'.includes(c)) { end--; continue; }
     if (c === "'") { end--; continue; }
     if (c === ')') {
       // balance parens in the url
@@ -391,10 +433,11 @@ function tryExtAutolink(s, i) {
       break;
     }
     if (c === ';') {
-      // if the ; could close an entity, drop it
+      // a trailing ; that closes an entity (&xxx;) drops the whole entity;
+      // otherwise just the ; is dropped
       const amp = url.lastIndexOf('&', end - 2);
-      if (amp !== -1 && /^&[A-Za-z0-9]+$/.test(url.slice(amp, end - 1))) { end--; continue; }
-      break;
+      if (amp !== -1 && /^&[A-Za-z0-9]+$/.test(url.slice(amp, end - 1))) { end = amp; continue; }
+      end--; continue;
     }
     break;
   }
@@ -636,7 +679,7 @@ function parseInline(src, refs, opts) {
     // --- GFM extended autolink (www. / http(s) / email) ---
     if (c === 'w' || c === 'h' || isAlnum(c)) {
       const prev = i > 0 ? src[i - 1] : '';
-      const prevOk = prev === '' || isSpace(prev) || prev === '*' || prev === '_' || prev === '~' || prev === '(';
+      const prevOk = prev === '' || isUnicodeWs(prev) || isPunct(prev);
       if (prevOk) {
         const ea = tryExtAutolink(src, i);
         if (ea) { flushText(i); nodes.push(ea.node); i = ea.next; textStart = i; continue; }
