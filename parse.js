@@ -361,7 +361,7 @@ function tryAutolink(s, i) {
 
 // GFM extended autolink: www. / http(s):// / email in plain text.
 // Returns {node, next} or null. s[i] is the start char.
-function tryExtAutolink(s, i) {
+function tryExtAutolink(s, i, hasUOpener) {
   const n = s.length;
   let isWww = false, isHttp = false, isEmail = false;
   let start = i;
@@ -387,6 +387,8 @@ function tryExtAutolink(s, i) {
             if (k > j + 1) end = k;
           }
           let cand = s.slice(i, end);
+          // a trailing _ that closes an open _ emphasis is not part of the address
+          if (hasUOpener && cand.endsWith('_')) cand = cand.slice(0, -1);
           // trim trailing punctuation (never _ or -) + entity rule
           while (cand.length > 0) {
             const c = cand[cand.length - 1];
@@ -415,6 +417,8 @@ function tryExtAutolink(s, i) {
       let d = j + 1;
       while (d < n && /[A-Za-z0-9._-]/.test(s[d])) d++;
       let cand = s.slice(i, d);
+      // a trailing _ that closes an open _ emphasis is not part of the address
+      if (hasUOpener && cand.endsWith('_')) { cand = cand.slice(0, -1); d--; }
       // trim trailing dots (a.b. links as a.b + '.')
       while (cand.endsWith('.')) { cand = cand.slice(0, -1); d--; }
       if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(cand)
@@ -710,7 +714,7 @@ function parseInline(src, refs, opts) {
       const prev = i > 0 ? src[i - 1] : '';
       const prevOk = prev === '' || isUnicodeWs(prev) || isPunct(prev);
       if (prevOk) {
-        const ea = tryExtAutolink(src, i);
+        const ea = tryExtAutolink(src, i, nodes.some(nd => nd.t === 'delim' && nd.ch === '_' && nd.canOpen && nd.active));
         if (ea) { flushText(i); nodes.push(ea.node); i = ea.next; textStart = i; continue; }
       }
       i++; continue;
