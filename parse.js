@@ -232,7 +232,7 @@ function parseInlineLink(s, i, refs) {
 // corpus: forms in doc-03/05/10/30/33 (span last, no title); does not
 // form in doc-16/18/20/22/23/28/30 (text after the span, or a title).
 // Returns true if the link must NOT form.
-function backtickSpanBreaksLabel(label, hasTitle) {
+function backtickSpanBreaksLabel(label) {
   const n = label.length;
   let i = 0;
   let lastSpanEnd = -1;
@@ -264,7 +264,10 @@ function backtickSpanBreaksLabel(label, hasTitle) {
     i++;
   }
   if (!hasSpan) return false;
-  if (hasTitle) return true;
+  // a backtick code span breaks the link only when it does NOT end the
+  // label: doc-23/doc-20 form the link with the span at the end even
+  // when a title is present ("Buffer version", "Can buffer"); doc-16/20
+  // break it when text follows the span (_node/_previous _)
   return lastSpanEnd !== n;
 }
 
@@ -741,7 +744,7 @@ function parseInline(src, refs, opts) {
       // link unless the span ends the label and there is no title
       if (formed) {
         const labelRaw = src.slice(br.pos + 1, i);
-        if (labelRaw.includes('`') && backtickSpanBreaksLabel(labelRaw, title !== null)) formed = false;
+        if (labelRaw.includes('`') && backtickSpanBreaksLabel(labelRaw)) formed = false;
       }
       if (formed) {
         const children = nodes.slice(br.idx + 1, closeIdx);
@@ -755,7 +758,8 @@ function parseInline(src, refs, opts) {
         // autolinks inside link text become plain text (no nested <a>)
         if (!br.image) flattenAutoLinks(children);
         // emphasis inside the link/image text is resolved now
-        processEmphasis(children);
+        // (inLabel: a '_' pair spanning a backtick code span stays literal)
+        processEmphasis(children, true);
         // remove bracket nodes and the ']' node, and '!' if image
         let startIdx = br.idx;
         if (br.image) startIdx = br.bangIdx;
@@ -771,7 +775,13 @@ function parseInline(src, refs, opts) {
         brackets.splice(b, 1);
         i = next; textStart = i; continue;
       }
-      // not a link: leave literal, deactivate this bracket
+      // not a link: leave literal, deactivate this bracket. A failed
+      // label keeps '_' pairs spanning a backtick code span literal
+      // (doc-16/20), so mark its '_' delims for the label rule.
+      for (let q = br.idx + 1; q < closeIdx; q++) {
+        const nd = nodes[q];
+        if (nd.t === 'delim' && nd.ch === '_') nd._inLabel = true;
+      }
       brackets[b].active = false;
       i++; textStart = i; continue;
     }
@@ -821,7 +831,19 @@ function parseInline(src, refs, opts) {
 }
 
 // ---- emphasis / strikethrough resolution ----
-function processEmphasis(nodes) {
+// true when the node list holds (at any depth) a code span whose content
+// contains a backtick — a `` `` a ` b `` `` span. A '_' pair spanning
+// such a code does not form inside a link label (doc-16/20 failed labels,
+// doc-23 formed label), but forms in plain text (doc-14/24, doc-03/09).
+function spanHasBacktickCode(list) {
+  for (const nd of list) {
+    if (nd.t === 'code' && nd.s.includes('`')) return true;
+    if (nd.children && spanHasBacktickCode(nd.children)) return true;
+  }
+  return false;
+}
+
+function processEmphasis(nodes, inLabel) {
   // openersBottom[ch] is a NODE reference: the scan for an opener stops when
   // it reaches that node. When an opener is fully consumed, the bottom is
   // set to the closer node; if the closer was also fully consumed (removed
@@ -858,6 +880,10 @@ function processEmphasis(nodes) {
           }
         }
       }
+      // a '_' pair spanning a backtick code span does not form inside a
+      // link label (doc-16/20/23); in plain text it forms (doc-14/24).
+      // Any earlier opener would span the same code, so stop searching.
+      if (ch === '_' && (inLabel || closer._inLabel || cand._inLabel) && spanHasBacktickCode(nodes.slice(q + 1, ci))) break;
       oi = q; break;
     }
     if (oi === -1) {
