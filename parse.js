@@ -226,6 +226,48 @@ function parseInlineLink(s, i, refs) {
   return null;
 }
 
+// A code span whose content contains a backtick (opener run >= 2, e.g.
+// `` a ` b ``) breaks link formation in marked unless the span is the
+// last thing in the label and no title is present. Verified on the
+// corpus: forms in doc-03/05/10/30/33 (span last, no title); does not
+// form in doc-16/18/20/22/23/28/30 (text after the span, or a title).
+// Returns true if the link must NOT form.
+function backtickSpanBreaksLabel(label, hasTitle) {
+  const n = label.length;
+  let i = 0;
+  let lastSpanEnd = -1;
+  let hasSpan = false;
+  while (i < n) {
+    const c = label[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') {
+      let j = i;
+      while (j < n && label[j] === '`') j++;
+      const run = j - i;
+      let k = j, found = -1;
+      while (k < n) {
+        if (label[k] === '`') {
+          let m = k;
+          while (m < n && label[m] === '`') m++;
+          if (m - k === run) { found = k; break; }
+          k = m;
+        } else k++;
+      }
+      if (found !== -1) {
+        if (label.slice(j, found).includes('`')) { hasSpan = true; lastSpanEnd = found + run; }
+        i = found + run;
+        continue;
+      }
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  if (!hasSpan) return false;
+  if (hasTitle) return true;
+  return lastSpanEnd !== n;
+}
+
 // An autolink inside link text renders as plain text when the enclosing
 // link forms (no nested <a>): replace auto link nodes with their children.
 function flattenAutoLinks(nodes) {
@@ -664,6 +706,12 @@ function parseInline(src, refs, opts) {
         // brackets (escapes not resolved), same rule as collapsed refs
         const ref = refs.get(normalizeLabel(src.slice(br.pos + 1, i)));
         if (ref) { dest = ref.dest; title = ref.title; next = i + 1; formed = true; }
+      }
+      // marked: a code span containing a backtick in the label breaks the
+      // link unless the span ends the label and there is no title
+      if (formed) {
+        const labelRaw = src.slice(br.pos + 1, i);
+        if (labelRaw.includes('`') && backtickSpanBreaksLabel(labelRaw, title !== null)) formed = false;
       }
       if (formed) {
         const children = nodes.slice(br.idx + 1, closeIdx);
